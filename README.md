@@ -214,6 +214,26 @@ invented.
 lands below target, the engine re-prompts with the specific uncovered keywords,
 up to `JP_MAX_TAILOR_ITERATIONS` times, and keeps the best result.
 
+**Finding roles.** Claude searches the web for companies hiring against your
+criteria and returns their job-board URLs; every posting is then read from that
+company's own public API (Greenhouse, Lever, Ashby). The model supplies
+companies, the employer supplies jobs — so it cannot invent a posting. Board
+postings arrive with their description attached, so no page fetch is needed.
+
+**The resolution ladder.** Before any field is escalated to you it goes through:
+
+1. **Profile rule** — a fact from `master_profile`. Deterministic, authoritative.
+2. **Something you answered before** — reused across applications, matched loosely.
+3. **Inference** — one batched call per form. The model may answer only from
+   your profile and past answers, must quote the fact it relied on, and an
+   ungrounded or low-confidence answer is discarded.
+4. **You** — the action queue.
+
+Legal and identity questions (work authorisation, sponsorship, clearance, EEO,
+salary, criminal history) never reach step 3. They are answered from your
+profile or by you, never by inference — a plausible guess there is a false
+statement on an application.
+
 **Screener answers are deterministic.** Legal answers — work authorisation,
 sponsorship, clearance, voluntary disclosures — come from `master_profile.json`
 via a regex rule table, never from the LLM. The LLM only supplies answers to

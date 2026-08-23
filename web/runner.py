@@ -192,10 +192,20 @@ def run_apply_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     profile = load_profile(db, user_id)
     resume = TailoredResumeSchema.model_validate(json.loads(application.tailored_payload or "{}"))
 
-    # Anything answered in the dashboard is reused here, which is what lets a
-    # job that unwound for a missing value succeed on its next run.
-    answers = {**db.answered_action_map(user_id), **resume.screener_answers}
-    mapper = ScreenerMapper(profile, answers)
+    # The resolution ladder: profile rules, then answers you have already
+    # given, then a single batched inference attempt, then you.
+    from engine.answer_resolver import LLMAnswerResolver
+
+    resolver = LLMAnswerResolver(
+        api_key=db.get_anthropic_key(user_id),
+        on_usage=usage_recorder(db, user_id, [application.id], settings.LLM_MODEL_BULK),
+    )
+    mapper = ScreenerMapper(
+        profile,
+        screener_answers=resume.screener_answers,
+        remembered=db.answered_action_map(user_id),
+        resolver=resolver,
+    )
 
     driver_class = get_driver_class(application.job_url)
     db.log_event(user_id, "apply_start",

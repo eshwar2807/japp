@@ -784,3 +784,76 @@ def test_healthz_is_public_and_leaks_nothing(web):
     assert response.json() == {"status": "ok"}
     # No account, version or configuration detail in an unauthenticated probe.
     assert "email" not in response.text and "version" not in response.text
+
+
+# ---------------- discovery UI ----------------
+
+
+def test_discover_page_renders_with_profile_defaults(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    profile = _ready_profile()
+    profile["target_titles"] = ["Senior Backend Engineer"]
+    web.db.save_profile(user.id, profile)
+
+    page = web.get("/discover").text
+    assert "Senior Backend Engineer" in page
+    assert "Greenhouse" in page and "Lever" in page
+
+
+def test_discovery_queues_a_job_and_remembers_the_criteria(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    response = web.post("/discover", data={
+        "titles": "Senior Backend Engineer\nStaff Engineer",
+        "locations": "Austin\nRemote", "seniority": "Senior",
+        "remote_only": "on", "max_companies": "10", "max_postings": "20",
+        "csrf_token": csrf(web)})
+    assert response.status_code == 303
+
+    jobs = [j for j in web.db.list_jobs(user_id=user.id) if j.kind == "discover"]
+    assert len(jobs) == 1
+
+    import json
+    criteria = json.loads(jobs[0].job_description)
+    assert criteria["titles"] == ["Senior Backend Engineer", "Staff Engineer"]
+    assert criteria["remote_only"] is True
+
+    # Reopening the page shows what was searched last time.
+    assert "Staff Engineer" in web.get("/discover").text
+
+
+def test_discovery_requires_at_least_one_title(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    response = web.post("/discover", data={"titles": "  ", "csrf_token": csrf(web)})
+    assert "error=" in response.headers["location"]
+    assert [j for j in web.db.list_jobs(user_id=user.id) if j.kind == "discover"] == []
+
+
+def test_discovery_requires_an_api_key(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+
+    response = web.post("/discover", data={"titles": "Backend Engineer",
+                                           "csrf_token": csrf(web)})
+    assert response.headers["location"].startswith("/settings")
+
+
+def test_discovery_criteria_are_scoped_per_user(web):
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(ada.id, _ready_profile())
+    web.db.set_anthropic_key(ada.id, "sk-ant-test")
+    web.post("/discover", data={"titles": "Quantum Cartographer", "csrf_token": csrf(web)})
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    assert "Quantum Cartographer" not in other.get("/discover").text

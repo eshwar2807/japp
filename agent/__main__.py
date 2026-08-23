@@ -76,7 +76,21 @@ def run_one(client: DashboardClient, payload: dict) -> None:
 
     profile = MasterProfile.model_validate(payload["profile"])
     tailored = TailoredResumeSchema.model_validate(payload.get("tailored") or {})
-    mapper = ScreenerMapper(profile, payload.get("known_answers") or {})
+
+    # Same resolution ladder the server uses: rules, then what you have
+    # answered before, then one batched inference attempt, then you.
+    resolver = None
+    if payload.get("anthropic_key"):
+        from engine.answer_resolver import LLMAnswerResolver
+
+        resolver = LLMAnswerResolver(api_key=payload["anthropic_key"])
+
+    mapper = ScreenerMapper(
+        profile,
+        screener_answers=tailored.screener_answers,
+        remembered=payload.get("known_answers") or {},
+        resolver=resolver,
+    )
 
     with tempfile.TemporaryDirectory(prefix="jp_agent_") as tmp:
         resume = client.download_resume(payload["resume_url"], Path(tmp) / "resume.pdf")

@@ -1234,3 +1234,12 @@ class DBManager:
             user = sess.get(User, user_id)
             if user:
                 user.last_digest_at = datetime.now(timezone.utc)
+
+    def save_discovery_criteria(self, user_id: int, criteria: dict) -> None:
+        """Remember the last search so it does not have to be retyped."""
+        profile = self.get_profile(user_id) or {}
+        profile["_discovery"] = criteria
+        self.save_profile(user_id, profile)
+
+    def get_discovery_criteria(self, user_id: int) -> dict | None:
+        return (self.get_profile(user_id) or {}).get("_discovery")

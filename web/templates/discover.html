@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Discover{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Find roles</h1>
+    <p class="sub">Claude searches for companies hiring against your criteria, then
+      reads their actual postings from each company's own job-board API.</p></div>
+</div>
+
+<div class="grid grid-4 mb-6">
+  <div class="stat"><div class="value">{{ applications_today }}/{{ daily_cap }}</div>
+    <div class="label">Applications today</div>
+    <div class="note">discovery stops at the cap</div></div>
+  <div class="stat"><div class="value">{{ spend_today|money }}</div>
+    <div class="label">Spend today</div>
+    <div class="note">cap {{ spend_cap|money }}</div></div>
+  <div class="stat"><div class="value fs-lg mono">{{ bulk_model }}</div>
+    <div class="label">Tailoring model</div>
+    <div class="note">bulk tier</div></div>
+  <div class="stat"><div class="value fs-lg mono">{{ discovery_model }}</div>
+    <div class="label">Search model</div>
+    <div class="note">needs web search</div></div>
+</div>
+
+<div class="card">
+  <h2>What are you looking for?</h2>
+  <form method="post" action="/discover" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="field"><label for="titles">Job titles (one per line)</label>
+      <textarea id="titles" name="titles" required
+        placeholder="Senior Backend Engineer&#10;Staff Software Engineer">{{ criteria.titles|join('\n') }}</textarea>
+      <p class="hint">A posting must contain one of these in its title to be queued.</p></div>
+
+    <div class="field-row">
+      <div class="field"><label for="seniority">Seniority</label>
+        <input id="seniority" type="text" name="seniority" value="{{ criteria.seniority }}"
+               placeholder="Senior / Staff"></div>
+      <div class="field"><label for="company_size">Company size</label>
+        <input id="company_size" type="text" name="company_size" value="{{ criteria.company_size }}"
+               placeholder="Series B to public"></div>
+    </div>
+
+    <div class="field"><label for="locations">Locations (one per line)</label>
+      <textarea id="locations" name="locations"
+        placeholder="Austin&#10;Remote">{{ criteria.locations|join('\n') }}</textarea></div>
+
+    <label class="check mb-4">
+      <input type="checkbox" name="remote_only" {{ 'checked' if criteria.remote_only }}>
+      Remote roles only
+    </label>
+
+    <div class="field"><label for="industries">Industries (optional, one per line)</label>
+      <textarea id="industries" name="industries"
+        placeholder="fintech&#10;developer tools">{{ criteria.industries|join('\n') }}</textarea></div>
+
+    <div class="field"><label for="exclude_companies">Never show me (one per line)</label>
+      <textarea id="exclude_companies" name="exclude_companies"
+        placeholder="Companies you don't want to see">{{ criteria.exclude_companies|join('\n') }}</textarea>
+      <p class="hint">Companies you have already applied to are excluded automatically.</p></div>
+
+    <div class="field-row">
+      <div class="field"><label for="max_companies">Companies to search</label>
+        <input id="max_companies" type="number" name="max_companies" min="1" max="40"
+               value="{{ criteria.max_companies }}"></div>
+      <div class="field"><label for="max_postings">Postings to queue</label>
+        <input id="max_postings" type="number" name="max_postings" min="1" max="500"
+               value="{{ criteria.max_postings }}">
+        <p class="hint">Capped at your remaining daily allowance either way.</p></div>
+    </div>
+
+    <button type="submit">Search and queue</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>How this works</h2>
+  <p class="sub">Claude finds <strong>companies</strong>; each company's own board API
+    supplies the <strong>postings</strong>. It cannot invent a job — if the board
+    does not return it, it does not get queued. Boards read: Greenhouse, Lever,
+    Ashby. Companies whose board cannot be identified are reported, not guessed at.</p>
+</div>
+
+{% if recent %}
+<div class="card">
+  <h2>Recent searches</h2>
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>When</th><th>Status</th><th>Result</th></tr>
+    {% for job in recent %}
+    <tr>
+      <td class="mono">{{ job.id }}</td>
+      <td class="muted">{{ job.created_at.strftime('%b %d %H:%M') }}</td>
+      <td>{% if job.status.value == 'Done' %}<span class="pill pill-good">Done</span>
+          {% elif job.status.value == 'Running' %}<span class="pill pill-warn">Running</span>
+          {% else %}<span class="pill pill-mute">{{ job.status.value }}</span>{% endif %}</td>
+      <td class="fs-sm">{{ job.message[:80] }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+</div>
+{% endif %}
+{% endblock %}

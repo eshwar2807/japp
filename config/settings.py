@@ -70,7 +70,7 @@ LLM_MODEL_DISCOVERY = os.getenv("JP_LLM_MODEL_DISCOVERY", "claude-opus-5")
 # billing past it; 0 disables the cap.
 DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
 # Applications the discovery queue may enqueue per user per day.
-DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "100"))
+DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "20"))
 LLM_EFFORT = os.getenv("JP_LLM_EFFORT", "high")        # low|medium|high|xhigh|max
 LLM_MAX_TOKENS = int(os.getenv("JP_LLM_MAX_TOKENS", "16000"))
 LLM_TEMPERATURE: float | None = (

@@ -13,6 +13,7 @@
     <div class="brand">Job Pipeline<small>{{ user.email }}</small></div>
     <div class="nav">
       <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
+      <a href="/discover" class="{{ 'active' if path.startswith('/discover') }}">Find roles</a>
       <a href="/applications" class="{{ 'active' if path.startswith('/applications') }}">Applications</a>
       <a href="/queue" class="{{ 'active' if path.startswith('/queue') }}">
         Queue {% if queue.active %}<span class="badge">{{ queue.active }}</span>{% endif %}

@@ -277,6 +277,80 @@ def download_resume(request: Request, user: CurrentUser, db: Database, app_id: i
 
 
 # --------------------------------------------------------------------------
+# Discovery
+# --------------------------------------------------------------------------
+
+
+@router.get("/discover", response_class=HTMLResponse)
+def discover_page(request: Request, user: CurrentUser, db: Database,
+                  ok: str = "", error: str = ""):
+    from engine.discovery import DiscoveryCriteria
+
+    profile = db.get_profile(user.id) or {}
+    saved = db.get_discovery_criteria(user.id)
+    criteria = DiscoveryCriteria.model_validate(saved) if saved else DiscoveryCriteria(
+        titles=profile.get("target_titles") or [],
+        locations=[str((profile.get("contact") or {}).get("location", {}).get("city", ""))]
+        if profile else [],
+    )
+    runs = db.list_jobs(user_id=user.id, limit=50)
+    return render(
+        request, "discover.html", user, db,
+        criteria=criteria,
+        recent=[j for j in runs if j.kind == "discover"][:10],
+        applications_today=db.applications_today(user.id),
+        daily_cap=settings.DAILY_APPLICATION_CAP,
+        spend_today=db.spend_today(user.id),
+        spend_cap=db.daily_cap_for(user.id),
+        discovery_model=settings.LLM_MODEL_DISCOVERY,
+        bulk_model=db.model_for_job(user.id, priority=False),
+        ok=ok, error=error,
+    )
+
+
+@router.post("/discover")
+async def start_discovery(request: Request, user: CurrentUser, db: Database,
+                          _csrf: None = CSRFProtected):
+    from engine.discovery import DiscoveryCriteria
+
+    form = await request.form()
+
+    def lines(key: str) -> list[str]:
+        raw = str(form.get(key, "") or "")
+        return [part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()]
+
+    try:
+        criteria = DiscoveryCriteria(
+            titles=lines("titles"),
+            locations=lines("locations"),
+            seniority=str(form.get("seniority", "")).strip(),
+            industries=lines("industries"),
+            company_size=str(form.get("company_size", "")).strip(),
+            remote_only=str(form.get("remote_only", "")).lower() in ("on", "true", "1"),
+            exclude_companies=lines("exclude_companies"),
+            max_companies=int(form.get("max_companies") or 15),
+            max_postings=int(form.get("max_postings") or settings.DAILY_APPLICATION_CAP),
+        )
+    except (ValueError, TypeError) as exc:
+        return _redirect("/discover", error=f"Those criteria are not valid: {exc}"[:200])
+
+    if not criteria.titles:
+        return _redirect("/discover", error="Give at least one job title to search for.")
+
+    profile = db.get_profile(user.id)
+    if not profile or not completeness(profile)["ready"]:
+        return _redirect("/profile", error="Complete your profile before discovering roles.")
+    if not db.get_anthropic_key(user.id) and not settings.ANTHROPIC_API_KEY:
+        return _redirect("/settings", error="Add your Anthropic API key first.")
+
+    db.save_discovery_criteria(user.id, criteria.model_dump())
+    db.enqueue_job(user.id, kind="discover",
+                   job_description=criteria.model_dump_json())
+    db.log_event(user.id, "discovery_queued", f"Searching for: {criteria.describe()}")
+    return _redirect("/queue", ok="Searching for roles. Postings will appear in the queue.")
+
+
+# --------------------------------------------------------------------------
 # Batch queue
 # --------------------------------------------------------------------------
 

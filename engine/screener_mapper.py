@@ -36,6 +36,8 @@ OPTION_MATCH_THRESHOLD = 80
 class AnswerSource(str, enum.Enum):
     RULE = "rule"          # master_profile, deterministic
     LLM = "llm"            # tailoring pass, posting-specific
+    MEMORY = "memory"      # something you answered before, reused
+    INFERRED = "inferred"  # derived from profile facts, with grounding
     UNMAPPED = "unmapped"  # escalate to a human
 
 
@@ -172,7 +174,9 @@ RULES: list[tuple[str, str, Resolver]] = [
     # --- current role ---
     ("current_company", r"current\s+(employer|company|organi)", lambda p: _current(p, "company")),
     ("current_title", r"current\s+(title|role|position|job)", lambda p: _current(p, "title")),
-    ("years_experience", r"years\s+of\s+(relevant\s+)?experience|how\s+many\s+years", lambda p: _years_experience(p)),
+    ("years_experience",
+     r"years\s+of\s+(relevant\s+)?experience|how\s+many\s+years|years?\s+of\s+experience",
+     lambda p, q="": _years_experience(p, q)),
 ]
 
 _COMPILED: list[tuple[str, re.Pattern[str], Resolver]] = [
@@ -209,8 +213,38 @@ def _current(profile: MasterProfile, attr: str) -> str | None:
     return getattr(profile.experience[0], attr, None) if profile.experience else None
 
 
-def _years_experience(profile: MasterProfile) -> str | None:
+#: Words that keep a "years of experience" question generic. Anything else
+#: after "years of" names a specific skill, and total career length is not the
+#: answer to that.
+_GENERIC_EXPERIENCE_WORDS = {
+    "relevant", "professional", "work", "working", "total", "overall",
+    "industry", "experience", "engineering", "software", "full", "time",
+    "fulltime", "post", "graduate", "your", "of", "do", "you", "have", "the",
+    "in", "a", "an", "and", "with", "how", "many", "years", "year",
+}
+
+
+def _asks_about_a_specific_skill(question: str) -> bool:
+    """True when a years-of-experience question names a particular technology.
+
+    "How many years of experience do you have?" is answerable from employment
+    dates. "How many years of Go?" is not - answering it with total career
+    length is simply a wrong number on a job application.
+    """
+    match = re.search(r"years?\s+(?:of\s+)?(.{0,40})", question, re.IGNORECASE)
+    if not match:
+        return False
+    tail = re.sub(r"[^a-z0-9+#. ]+", " ", match.group(1).lower())
+    return any(
+        word and word not in _GENERIC_EXPERIENCE_WORDS
+        for word in tail.split()
+    )
+
+
+def _years_experience(profile: MasterProfile, question: str = "") -> str | None:
     """Total professional years, derived from the earliest start date."""
+    if question and _asks_about_a_specific_skill(question):
+        return None
     starts = [e.start_date for e in profile.experience if e.start_date]
     if not starts:
         return None
@@ -236,9 +270,15 @@ class ScreenerMapper:
         self,
         profile: MasterProfile,
         screener_answers: dict[str, str] | None = None,
+        remembered: dict[str, str] | None = None,
+        resolver: Any | None = None,
     ) -> None:
         self.profile = profile
         self.screener_answers = screener_answers or {}
+        #: Answers the user gave to earlier applications, reused verbatim.
+        self.remembered = remembered or {}
+        #: Optional LLM fallback, tried once per form before escalating.
+        self.resolver = resolver
 
     # ---------------- resolution ----------------
 
@@ -248,7 +288,12 @@ class ScreenerMapper:
             if not pattern.search(question):
                 continue
             try:
-                value = resolver(self.profile)
+                # A few resolvers need the question text to tell a generic
+                # question from one about a specific technology.
+                try:
+                    value = resolver(self.profile, question)
+                except TypeError:
+                    value = resolver(self.profile)
             except (AttributeError, KeyError, IndexError, TypeError):
                 value = None
             if value is None:
@@ -259,20 +304,29 @@ class ScreenerMapper:
                 return text, name
         return None
 
-    def _from_llm(self, question: str) -> tuple[str, float] | None:
-        """Fuzzy-match the field label against the tailoring pass's answers."""
-        if not self.screener_answers:
+    def _from_answers(
+        self, question: str, pool: dict[str, str]
+    ) -> tuple[str, float] | None:
+        """Fuzzy-match a field label against a pool of known answers."""
+        if not pool:
             return None
         match = process.extractOne(
-            question,
-            list(self.screener_answers),
-            scorer=fuzz.token_set_ratio,
-            processor=default_process,
+            question, list(pool), scorer=fuzz.token_set_ratio, processor=default_process
         )
         if match and match[1] >= 75:
-            # LLM answers are inherently less authoritative than profile facts.
-            return self.screener_answers[match[0]], min(0.70 + (match[1] - 75) / 100, 0.9)
+            return pool[match[0]], min(0.70 + (match[1] - 75) / 100, 0.9)
         return None
+
+    def _from_llm(self, question: str) -> tuple[str, float] | None:
+        return self._from_answers(question, self.screener_answers)
+
+    def _from_memory(self, question: str) -> tuple[str, float] | None:
+        """Something answered on a previous application.
+
+        Ranked above the tailoring pass's own answers: a value the user typed
+        themselves outranks one the model composed.
+        """
+        return self._from_answers(question, self.remembered)
 
     def map_field(self, field: FieldSpec) -> MappedAnswer:
         question = field.question
@@ -285,28 +339,29 @@ class ScreenerMapper:
         if rule:
             value, rule_name = rule
             answer = MappedAnswer(
-                question=question,
-                value=value,
-                source=AnswerSource.RULE,
-                confidence=1.0,
-                reason=f"master_profile rule '{rule_name}'",
+                question=question, value=value, source=AnswerSource.RULE,
+                confidence=1.0, reason=f"master_profile rule '{rule_name}'",
             )
         else:
-            llm = self._from_llm(question)
-            if llm:
+            remembered = self._from_memory(question)
+            llm = self._from_llm(question) if remembered is None else None
+            if remembered:
+                value, confidence = remembered
+                answer = MappedAnswer(
+                    question=question, value=value, source=AnswerSource.MEMORY,
+                    confidence=confidence, reason="you answered this before",
+                )
+            elif llm:
                 value, confidence = llm
                 answer = MappedAnswer(
-                    question=question,
-                    value=value,
-                    source=AnswerSource.LLM,
-                    confidence=confidence,
-                    reason="tailored screener answer",
+                    question=question, value=value, source=AnswerSource.LLM,
+                    confidence=confidence, reason="tailored screener answer",
                 )
             else:
                 return MappedAnswer(
                     question=question,
                     source=AnswerSource.UNMAPPED,
-                    reason="No profile rule or tailored answer matched this field.",
+                    reason="No profile rule, past answer or tailored answer matched.",
                 )
 
         # Constrained controls: the value must correspond to a real option.
@@ -350,12 +405,14 @@ class ScreenerMapper:
     def map_form(self, fields: list[FieldSpec]) -> tuple[dict[str, MappedAnswer], list[MappedAnswer]]:
         """Map a whole form.
 
-        Returns ``(autofillable, escalations)`` where escalations are the fields
-        a human must handle. Optional fields that could not be mapped are
-        skipped silently; required ones always escalate.
+        Returns ``(autofillable, escalations)``. Anything the deterministic
+        steps cannot answer is offered to the resolver in a single batched call
+        before being escalated, so a human is asked only about fields that
+        genuinely have no honest answer available.
         """
         autofill: dict[str, MappedAnswer] = {}
         escalations: list[MappedAnswer] = []
+        pending: list[tuple[FieldSpec, MappedAnswer]] = []
 
         for field in fields:
             if field.field_type is FieldType.FILE:
@@ -363,8 +420,52 @@ class ScreenerMapper:
             answer = self.map_field(field)
             if answer.needs_human:
                 if field.required or answer.source is not AnswerSource.UNMAPPED:
-                    escalations.append(answer)
+                    pending.append((field, answer))
                 continue
             autofill[field.selector or field.name or field.label] = answer
 
+        for field, answer in self._try_resolver(pending):
+            if answer.needs_human:
+                escalations.append(answer)
+            else:
+                autofill[field.selector or field.name or field.label] = answer
+
         return autofill, escalations
+
+    def _try_resolver(
+        self, pending: list[tuple[FieldSpec, MappedAnswer]]
+    ) -> list[tuple[FieldSpec, MappedAnswer]]:
+        """One batched attempt to answer what the deterministic steps missed."""
+        if not pending or self.resolver is None:
+            return pending
+
+        questions = [
+            {
+                "question": field.question,
+                "field_type": field.field_type.value,
+                "options": field.options,
+                "required": field.required,
+            }
+            for field, _ in pending
+        ]
+        known = {**self.remembered, **self.screener_answers}
+        resolved = self.resolver.resolve(questions, self.profile, known)
+
+        out: list[tuple[FieldSpec, MappedAnswer]] = []
+        for field, answer in pending:
+            candidate = resolved.get(field.question)
+            if candidate is None or not candidate.usable:
+                out.append((field, answer))
+                continue
+
+            inferred = MappedAnswer(
+                question=field.question,
+                value=candidate.answer,
+                source=AnswerSource.INFERRED,
+                confidence=candidate.confidence,
+                reason=f"derived from your profile: {candidate.grounding[:160]}",
+            )
+            if field.options:
+                inferred = self._match_option(inferred, field)
+            out.append((field, inferred))
+        return out
