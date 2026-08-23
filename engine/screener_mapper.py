@@ -102,19 +102,19 @@ RULES: list[tuple[str, str, Resolver]] = [
     (
         "auth_without_sponsorship",
         r"(authori[sz]ed|eligible|legally).{0,40}(work|employ).{0,60}without.{0,20}sponsor",
-        lambda p: _combined_auth(p),
+        lambda p, q="": _combined_auth(p) if _about_the_us(q) else None,
     ),
     # --- sponsorship ---
     (
         "sponsorship",
         r"(require|need|request).{0,40}sponsor|sponsorship.{0,30}(now|future|require)|visa\s+sponsor",
-        lambda p: p.legal.get("requires_sponsorship_now_or_future"),
+        lambda p, q="": _us_legal(p, q, "requires_sponsorship_now_or_future"),
     ),
     # --- work authorization ---
     (
         "work_authorization",
         r"(authori[sz]ed|eligible|legally\s+(able|entitled)|right)\s.{0,40}(work|employ)",
-        lambda p: p.legal.get("work_authorization_us"),
+        lambda p, q="": _us_legal(p, q, "work_authorization_us"),
     ),
     ("visa_status", r"visa\s*(status|type)|immigration\s+status|work\s+status", lambda p: p.legal.get("visa_status")),
     # --- clearance & checks ---
@@ -182,6 +182,40 @@ RULES: list[tuple[str, str, Resolver]] = [
 _COMPILED: list[tuple[str, re.Pattern[str], Resolver]] = [
     (name, re.compile(pattern, re.IGNORECASE), fn) for name, pattern, fn in RULES
 ]
+
+
+#: Jurisdictions that are not the United States. A work-authorisation answer
+#: about one country says nothing about another.
+_OTHER_JURISDICTIONS = re.compile(
+    r"\b(canada|canadian|united\s+kingdom|\buk\b|britain|british|ireland|irish|"
+    r"european\s+union|\beu\b|\beea\b|schengen|germany|german|france|french|"
+    r"netherlands|dutch|spain|italy|poland|portugal|sweden|switzerland|swiss|"
+    r"australia|australian|new\s+zealand|singapore|japan|china|hong\s+kong|"
+    r"india|indian|brazil|mexico|canada/us|emea|apac)\b",
+    re.IGNORECASE,
+)
+_US_MARKERS = re.compile(
+    r"\b(u\.?s\.?a?\.?|united\s+states|america|american)\b", re.IGNORECASE
+)
+
+
+def _about_the_us(question: str) -> bool:
+    """True unless the question is clearly about somewhere other than the US.
+
+    The profile records US work authorisation. Answering "are you eligible to
+    work in Canada?" from it is not a near-miss - it is a false statement on a
+    job application. When another jurisdiction is named and the US is not, the
+    rule declines and the question falls through to a past answer or to you.
+    """
+    if not question:
+        return True
+    if _US_MARKERS.search(question):
+        return True
+    return not _OTHER_JURISDICTIONS.search(question)
+
+
+def _us_legal(profile: MasterProfile, question: str, key: str) -> str | None:
+    return profile.legal.get(key) if _about_the_us(question) else None
 
 
 def _yes_no(value: Any) -> str:

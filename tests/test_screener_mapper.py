@@ -249,3 +249,54 @@ def test_map_form_splits_autofill_from_escalations(mapper):
 def test_file_fields_are_never_mapped_as_text(mapper):
     autofill, escalations = mapper.map_form([f("Resume/CV", field_type=FieldType.FILE, required=True)])
     assert autofill == {} and escalations == []
+
+
+# ---------------- jurisdiction ----------------
+
+
+@pytest.mark.parametrize("label", [
+    "Are you legally authorized to work in the United States?",
+    "Are you authorized to work in the US?",
+    "Are you legally authorized to work?",          # unqualified: assume US
+    "Are you eligible for employment in the U.S.A.?",
+])
+def test_us_work_authorization_answers_from_the_profile(mapper, label):
+    answer = mapper.map_field(f(label))
+    assert answer.source is AnswerSource.RULE
+    assert answer.value == "Yes"
+
+
+@pytest.mark.parametrize("label", [
+    "Are you eligible to work in Canada?",
+    "Do you have the right to work in the UK?",
+    "Are you authorized to work in the European Union?",
+    "Will you require sponsorship in Germany?",
+    "Are you eligible to work in Australia?",
+    "Do you have the right to work in India?",
+])
+def test_other_jurisdictions_never_answer_from_the_us_profile(prof, label):
+    """Regression: 'eligible to work in Canada?' answered Yes from
+    work_authorization_us — a false statement on a job application."""
+    answer = ScreenerMapper(prof).map_field(f(label, required=True))
+    assert answer.needs_human, f"{label} must not be answered from US authorisation"
+
+
+def test_a_remembered_answer_wins_for_another_jurisdiction(prof):
+    """Having declined to guess, it uses what you actually said."""
+    mapper = ScreenerMapper(prof, remembered={"Are you eligible to work in Canada?": "No"})
+    answer = mapper.map_field(f("Are you eligible to work in Canada?"))
+    assert answer.source is AnswerSource.MEMORY
+    assert answer.value == "No"
+
+
+def test_combined_auth_and_sponsorship_is_also_jurisdiction_aware(prof):
+    answer = ScreenerMapper(prof).map_field(
+        f("Are you authorized to work in Canada without sponsorship?", required=True))
+    assert answer.needs_human
+
+
+def test_a_question_naming_both_countries_still_answers_for_the_us(mapper):
+    """'US or Canada' mentions the US, so the US answer is the right one."""
+    answer = mapper.map_field(f("Are you authorized to work in the US or Canada?"))
+    assert answer.source is AnswerSource.RULE
+    assert answer.value == "Yes"
