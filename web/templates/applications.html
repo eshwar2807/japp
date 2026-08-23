@@ -6,17 +6,20 @@
 </div>
 
 <div class="card">
-  <h2>Tailor a new application</h2>
-  <form method="post" action="/applications/new">
+  <h2>Queue postings</h2>
+  <p class="sub">One URL per line to batch them. Each runs until it needs you, then
+    steps aside so the next starts — blocks collect under <a href="/actions">Needs you</a>.</p>
+  <form method="post" action="/applications/new" class="mt-4">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <div class="field"><label for="job_url">Job posting URL</label>
-      <input id="job_url" type="url" name="job_url" required
-             placeholder="https://boards.greenhouse.io/acme/jobs/123"></div>
+    <div class="field"><label for="job_url">Job posting URL(s)</label>
+      <textarea id="job_url" name="job_url" required
+        placeholder="https://boards.greenhouse.io/acme/jobs/123&#10;https://jobs.lever.co/other/abc"></textarea></div>
     <div class="field"><label for="job_description">Job description (optional)</label>
       <textarea id="job_description" name="job_description"
         placeholder="Paste the posting text here. More reliable than scraping when the page needs JavaScript."></textarea>
-      <p class="hint">Leave blank to fetch the page automatically.</p></div>
-    <button type="submit">Tailor resume</button>
+      <p class="hint">Leave blank to fetch each page automatically. Only applies
+        when queueing a single posting.</p></div>
+    <button type="submit">Queue</button>
   </form>
 </div>
 

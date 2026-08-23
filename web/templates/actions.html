@@ -3,14 +3,27 @@
 {% block content %}
 <div class="page-head">
   <div><h1>Needs you</h1>
-    <p class="sub">Anything the pipeline will not decide on its own. A paused run
-      picks your answer up automatically.</p></div>
+    <p class="sub">Anything the pipeline will not decide on its own. Answering
+      releases the run that was waiting on it, immediately.</p></div>
   <div class="actions-row">
     <a class="btn btn-ghost btn-sm" href="/actions?show=open">Open</a>
     <a class="btn btn-ghost btn-sm" href="/actions?show=answered">Answered</a>
     <a class="btn btn-ghost btn-sm" href="/actions?show=all">All</a>
   </div>
 </div>
+
+{% if blocked_count %}
+<div class="card card-warn">
+  <h2>{{ blocked_count }} run(s) are parked</h2>
+  <p class="sub">Work top to bottom — each answer releases its run straight away,
+    so the queue drains while you are still here.</p>
+  {% if held_count %}
+  <p class="hint mt-3">{{ held_count }} of them is holding a live browser window.
+    Those are marked below and must be handled in that window.</p>
+  {% endif %}
+  <p class="mt-4"><a href="/queue">See the queue →</a></p>
+</div>
+{% endif %}
 
 {% if items %}
   {% for item in items %}
@@ -20,6 +33,8 @@
         <span class="pill {{ 'pill-bad' if item.kind.value == 'Human verification' else 'pill-warn' }}">{{ item.kind.value }}</span>
         <span class="pill pill-mute">{{ item.status.value }}</span>
         {% if item.required %}<span class="pill pill-bad">Required</span>{% endif %}
+        {% if item.holds_browser %}<span class="pill pill-bad">holding a browser window</span>
+        {% elif item.blocking_job %}<span class="pill pill-warn">run parked</span>{% endif %}
       </div>
       <span class="hint">{{ item.created_at.strftime('%b %d, %H:%M') }}</span>
     </div>
@@ -37,6 +52,11 @@
       The browser window is parked on this challenge. Clear it yourself in that window,
       then approve below and the run continues from where it stopped. Nothing here
       solves or bypasses the check.
+    </div>
+    {% elif item.blocking_job and not item.holds_browser %}
+    <div class="flash flash-warn mt-4">
+      This run released its browser and will restart from the top once answered —
+      you stay logged in, and your answer is reused on every later application.
     </div>
     {% endif %}
 

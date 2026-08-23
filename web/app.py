@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from config import settings
-from web.deps import RedirectToLogin, get_db
+from web.deps import RedirectToLogin, get_db, get_worker
 from web.security import CSRF_COOKIE, SECURITY_HEADERS, generate_csrf_token
 
 log = logging.getLogger(__name__)
@@ -45,12 +45,19 @@ templates.env.filters["tokens"] = _fmt_tokens
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Housekeeping on boot: drop log rows past the retention window."""
+    """Boot housekeeping, then run the batch queue for the app's lifetime."""
     removed = get_db().prune_logs(settings.LOG_RETENTION_DAYS)
     if removed:
         log.info("Pruned %d log rows older than %d days.",
                  removed, settings.LOG_RETENTION_DAYS)
-    yield
+
+    worker = get_worker()
+    worker.start()
+    try:
+        yield
+    finally:
+        # Parked jobs are woken and cancelled so their browsers close cleanly.
+        worker.stop()
 
 
 def create_app() -> FastAPI:

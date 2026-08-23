@@ -14,6 +14,9 @@
     <div class="nav">
       <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
       <a href="/applications" class="{{ 'active' if path.startswith('/applications') }}">Applications</a>
+      <a href="/queue" class="{{ 'active' if path.startswith('/queue') }}">
+        Queue {% if queue.active %}<span class="badge">{{ queue.active }}</span>{% endif %}
+      </a>
       <a href="/actions" class="{{ 'active' if path == '/actions' }}">
         Needs you {% if open_actions %}<span class="badge">{{ open_actions }}</span>{% endif %}
       </a>
@@ -30,11 +33,16 @@
     </form>
   </nav>
 
-  <main class="main"{% if active_runs %} data-refresh-seconds="6"{% endif %}>
-    {% if active_runs %}
+  <main class="main"{% if queue.Running or queue.Queued or queue.Ready %} data-refresh-seconds="6"{% endif %}>
+    {% if queue.Running or queue.Queued or queue.Ready %}
     <div class="flash flash-warn">
-      {{ active_runs|length }} run(s) in progress — this page refreshes automatically.
-      {% for run in active_runs %}<div class="mono">{{ run.kind }} · {{ run.status }}</div>{% endfor %}
+      {{ queue.Running }} running, {{ queue.Queued + queue.Ready }} waiting — this page
+      refreshes automatically. <a href="/queue">View queue</a>
+    </div>
+    {% endif %}
+    {% if queue.Blocked %}
+    <div class="flash flash-err">
+      {{ queue.Blocked }} run(s) need you. <a href="/actions">Clear them →</a>
     </div>
     {% endif %}
     {% if ok %}<div class="flash flash-ok">{{ ok }}</div>{% endif %}

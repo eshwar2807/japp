@@ -27,7 +27,9 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from config import settings
 from database.models import (
     POSITIVE_STATUSES,
+    TERMINAL_JOB_STATUSES,
     ActionItem,
+    BlockMode,
     ActionKind,
     ActionStatus,
     Application,
@@ -35,8 +37,11 @@ from database.models import (
     Base,
     Credential,
     Feedback,
+    JobStatus,
     LLMUsage,
     LogLevel,
+    Notification,
+    RunJob,
     RunLog,
     User,
 )
@@ -761,4 +766,267 @@ class DBManager:
         cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
         with self.session() as sess:
             result = sess.execute(delete(RunLog).where(RunLog.created_at < cutoff))
+            return int(result.rowcount or 0)
+
+    # ======================================================================
+    # Batch queue
+    # ======================================================================
+
+    def enqueue_job(
+        self,
+        user_id: int,
+        kind: str = "tailor",
+        job_url: str = "",
+        job_description: str | None = None,
+        application_id: int | None = None,
+        batch_id: str | None = None,
+    ) -> RunJob:
+        with self.session() as sess:
+            position = int(
+                sess.scalar(
+                    select(func.coalesce(func.max(RunJob.position), 0)).where(
+                        RunJob.user_id == user_id
+                    )
+                )
+                or 0
+            )
+            job = RunJob(
+                user_id=user_id,
+                kind=kind,
+                job_url=job_url,
+                job_description=job_description,
+                application_id=application_id,
+                batch_id=batch_id,
+                position=position + 1,
+            )
+            sess.add(job)
+            sess.flush()
+            return job
+
+    def get_job(self, job_id: int, user_id: int | None = None) -> RunJob | None:
+        with self.session() as sess:
+            stmt = (
+                select(RunJob)
+                .where(RunJob.id == job_id)
+                .options(
+                    selectinload(RunJob.application),
+                    selectinload(RunJob.blocking_action),
+                )
+            )
+            if user_id is not None:
+                stmt = stmt.where(RunJob.user_id == user_id)
+            return sess.scalars(stmt).first()
+
+    def list_jobs(
+        self,
+        user_id: int | None = None,
+        statuses: tuple[JobStatus, ...] | None = None,
+        batch_id: str | None = None,
+        limit: int = 200,
+    ) -> Sequence[RunJob]:
+        with self.session() as sess:
+            stmt = (
+                select(RunJob)
+                .options(
+                    selectinload(RunJob.application),
+                    selectinload(RunJob.blocking_action),
+                )
+                .order_by(RunJob.position.asc(), RunJob.id.asc())
+                .limit(limit)
+            )
+            if user_id is not None:
+                stmt = stmt.where(RunJob.user_id == user_id)
+            if statuses:
+                stmt = stmt.where(RunJob.status.in_(statuses))
+            if batch_id:
+                stmt = stmt.where(RunJob.batch_id == batch_id)
+            return sess.scalars(stmt).all()
+
+    def claim_next_job(self) -> RunJob | None:
+        """Atomically move the oldest runnable job to RUNNING and return it.
+
+        READY (a human answered) is served before QUEUED, so clearing blocks
+        drains the backlog rather than competing with fresh work.
+        """
+        with self.session() as sess:
+            for status in (JobStatus.READY, JobStatus.QUEUED):
+                job = sess.scalars(
+                    select(RunJob)
+                    .where(RunJob.status == status)
+                    .order_by(RunJob.position.asc(), RunJob.id.asc())
+                    .limit(1)
+                    .with_for_update(nowait=False)
+                ).first()
+                if job is None:
+                    continue
+                job.status = JobStatus.RUNNING
+                job.started_at = datetime.now(timezone.utc)
+                job.attempts = (job.attempts or 0) + 1
+                job.block_mode = BlockMode.NONE
+                sess.flush()
+                sess.refresh(job)
+                return job
+            return None
+
+    def block_job(
+        self,
+        job_id: int,
+        mode: BlockMode,
+        message: str,
+        action_id: int | None = None,
+        holds_browser: bool = False,
+    ) -> RunJob:
+        with self.session() as sess:
+            job = sess.get(RunJob, job_id)
+            if job is None:
+                raise ValueError(f"No job with id {job_id}.")
+            job.status = JobStatus.BLOCKED
+            job.block_mode = mode
+            job.message = message
+            job.blocking_action_id = action_id
+            job.holds_browser = holds_browser
+            job.blocked_at = datetime.now(timezone.utc)
+            sess.flush()
+            return job
+
+    def release_job(self, job_id: int) -> RunJob:
+        """Mark a blocked job as answered and ready to resume."""
+        with self.session() as sess:
+            job = sess.get(RunJob, job_id)
+            if job is None:
+                raise ValueError(f"No job with id {job_id}.")
+            if job.status is JobStatus.BLOCKED:
+                job.status = JobStatus.READY
+                job.block_mode = BlockMode.NONE
+                job.message = ""
+            sess.flush()
+            return job
+
+    def finish_job(
+        self, job_id: int, status: JobStatus, message: str = "",
+        application_id: int | None = None,
+    ) -> RunJob:
+        with self.session() as sess:
+            job = sess.get(RunJob, job_id)
+            if job is None:
+                raise ValueError(f"No job with id {job_id}.")
+            job.status = status
+            job.message = message
+            job.holds_browser = False
+            job.block_mode = BlockMode.NONE
+            job.finished_at = datetime.now(timezone.utc)
+            if application_id is not None:
+                job.application_id = application_id
+            sess.flush()
+            return job
+
+    def cancel_job(self, job_id: int, user_id: int | None = None) -> RunJob:
+        with self.session() as sess:
+            job = sess.get(RunJob, job_id)
+            if job is None:
+                raise ValueError(f"No job with id {job_id}.")
+            if user_id is not None and job.user_id != user_id:
+                raise PermissionError("That job belongs to another user.")
+            if job.status not in TERMINAL_JOB_STATUSES:
+                job.status = JobStatus.CANCELLED
+                job.finished_at = datetime.now(timezone.utc)
+                job.holds_browser = False
+            sess.flush()
+            return job
+
+    def jobs_blocked_on_action(self, action_id: int) -> Sequence[RunJob]:
+        with self.session() as sess:
+            return sess.scalars(
+                select(RunJob).where(
+                    RunJob.blocking_action_id == action_id,
+                    RunJob.status == JobStatus.BLOCKED,
+                )
+            ).all()
+
+    def queue_summary(self, user_id: int) -> dict[str, int]:
+        with self.session() as sess:
+            rows = sess.execute(
+                select(RunJob.status, func.count(RunJob.id))
+                .where(RunJob.user_id == user_id)
+                .group_by(RunJob.status)
+            ).all()
+        counts = {status.value: 0 for status in JobStatus}
+        for status, count in rows:
+            counts[status.value] = int(count)
+        counts["active"] = counts["Queued"] + counts["Running"] + counts["Ready"]
+        return counts
+
+    def reset_stale_running_jobs(self) -> int:
+        """Requeue jobs left RUNNING by a crash or restart.
+
+        Without this a killed process strands work in RUNNING forever, since no
+        worker owns it any more.
+        """
+        with self.session() as sess:
+            stale = sess.scalars(
+                select(RunJob).where(RunJob.status == JobStatus.RUNNING)
+            ).all()
+            for job in stale:
+                job.status = JobStatus.QUEUED
+                job.started_at = None
+                job.holds_browser = False
+            return len(stale)
+
+    # ======================================================================
+    # Notifications
+    # ======================================================================
+
+    def record_notification(
+        self, user_id: int, channel: str, title: str, body: str,
+        delivered: bool = False, error: str = "", job_id: int | None = None,
+    ) -> Notification:
+        with self.session() as sess:
+            row = Notification(
+                user_id=user_id, job_id=job_id, channel=channel,
+                title=title[:255], body=body, delivered=delivered, error=error,
+            )
+            sess.add(row)
+            sess.flush()
+            return row
+
+    def list_notifications(self, user_id: int, limit: int = 50) -> Sequence[Notification]:
+        with self.session() as sess:
+            return sess.scalars(
+                select(Notification)
+                .where(Notification.user_id == user_id)
+                .order_by(Notification.id.desc())
+                .limit(limit)
+            ).all()
+
+    def recently_notified(self, user_id: int, within_seconds: int) -> bool:
+        """True if this user was notified inside the quiet window.
+
+        Stops a ten-application batch from firing ten notifications in a row.
+        """
+        if within_seconds <= 0:
+            return False
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=within_seconds)
+        with self.session() as sess:
+            latest = sess.scalars(
+                select(Notification)
+                .where(Notification.user_id == user_id, Notification.delivered.is_(True))
+                .order_by(Notification.id.desc())
+                .limit(1)
+            ).first()
+        if latest is None:
+            return False
+        created = latest.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return created > cutoff
+
+    def purge_finished_jobs(self, user_id: int) -> int:
+        """Drop terminal jobs from the queue view. History lives in run_logs."""
+        with self.session() as sess:
+            result = sess.execute(
+                delete(RunJob).where(
+                    RunJob.user_id == user_id,
+                    RunJob.status.in_(TERMINAL_JOB_STATUSES),
+                )
+            )
             return int(result.rowcount or 0)

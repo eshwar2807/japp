@@ -11,10 +11,9 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 
-from database.models import ActionStatus, ApplicationStatus, LogLevel
+from database.models import ActionStatus, ApplicationStatus, JobStatus, LogLevel
 from engine.cost_tracker import COST_WINDOWS, daily_series, summarize
-from web.deps import APIUser, Database
-from web.runner import runs
+from web.deps import APIUser, Database, get_worker
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
 
@@ -96,9 +95,11 @@ def create_application(request: Request, user: APIUser, db: Database,
     from web.deps import enforce_rate_limit
 
     enforce_rate_limit(request, "run", str(user.id))
-    state = runs.submit_tailor(db, user.id, url,
-                               str(payload.get("job_description", "")).strip() or None)
-    return state.as_dict()
+    job = db.enqueue_job(
+        user.id, kind="tailor", job_url=url,
+        job_description=str(payload.get("job_description", "")).strip() or None,
+    )
+    return {"job_id": job.id, "status": job.status.value, "job_url": job.job_url}
 
 
 @router.post("/applications/{app_id}/feedback")
@@ -143,7 +144,8 @@ def answer_action(user: APIUser, db: Database, action_id: int, payload: dict = B
     if not answer:
         raise HTTPException(400, "answer is required.")
     item = db.answer_action(action_id, answer, bool(payload.get("remember")), user_id=user.id)
-    return {"ok": True, "id": item.id, "status": item.status.value}
+    resumed = get_worker().release_action(action_id, answer)
+    return {"ok": True, "id": item.id, "status": item.status.value, "jobs_resumed": resumed}
 
 
 @router.get("/costs")
@@ -185,9 +187,49 @@ def logs(user: APIUser, db: Database, limit: int = Query(default=100, le=1000),
     }
 
 
-@router.get("/runs/{run_id}")
-def run_status(user: APIUser, run_id: str):
-    state = runs.get(run_id, user.id)
-    if state is None:
-        raise HTTPException(404, "Run not found.")
-    return state.as_dict()
+def _job_json(job) -> dict:
+    return {
+        "id": job.id,
+        "kind": job.kind,
+        "status": job.status.value,
+        "block_mode": job.block_mode.value,
+        "blocking_action_id": job.blocking_action_id,
+        "holds_browser": job.holds_browser,
+        "message": job.message,
+        "job_url": job.job_url,
+        "application_id": job.application_id,
+        "batch_id": job.batch_id,
+        "created_at": job.created_at.isoformat(),
+        "blocked_at": job.blocked_at.isoformat() if job.blocked_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+@router.get("/queue")
+def list_queue(user: APIUser, db: Database, status: str = Query(default="")):
+    statuses = None
+    if status:
+        try:
+            statuses = (JobStatus(status),)
+        except ValueError as exc:
+            valid = ", ".join(s.value for s in JobStatus)
+            raise HTTPException(400, f"status must be one of: {valid}") from exc
+    jobs = db.list_jobs(user_id=user.id, statuses=statuses)
+    return {"summary": db.queue_summary(user.id), "jobs": [_job_json(j) for j in jobs]}
+
+
+@router.get("/queue/{job_id}")
+def get_job(user: APIUser, db: Database, job_id: int):
+    job = db.get_job(job_id, user_id=user.id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+    return _job_json(job)
+
+
+@router.post("/queue/{job_id}/cancel")
+def cancel_job(user: APIUser, db: Database, job_id: int):
+    if db.get_job(job_id, user_id=user.id) is None:
+        raise HTTPException(404, "Job not found.")
+    get_worker().registry.cancel(job_id)
+    job = db.cancel_job(job_id, user_id=user.id)
+    return _job_json(job)

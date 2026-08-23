@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Queue{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Queue</h1>
+    <p class="sub">Each posting runs until it needs you, then steps aside so the
+      next one starts. Blocks pile up here for you to clear in one sitting.</p></div>
+  <div class="actions-row">
+    <a class="btn btn-ghost btn-sm" href="/applications">Queue more</a>
+    {% if summary.Done or summary.Failed or summary.Cancelled %}
+    <form method="post" action="/queue/clear-finished">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn-ghost btn-sm" type="submit">Clear finished</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="grid grid-4 mb-6">
+  <div class="stat"><div class="value">{{ summary.Queued + summary.Ready }}</div>
+    <div class="label">Waiting to run</div></div>
+  <div class="stat"><div class="value">{{ summary.Running }}</div>
+    <div class="label">Running</div></div>
+  <div class="stat"><div class="value">{{ summary.Blocked }}</div>
+    <div class="label">Need you</div>
+    <div class="note">{{ held }}/{{ max_held }} holding a browser</div></div>
+  <div class="stat"><div class="value">{{ summary.Done }}</div>
+    <div class="label">Done</div>
+    <div class="note">{{ summary.Failed }} failed</div></div>
+</div>
+
+{% if blocked %}
+<div class="card card-warn">
+  <h2>{{ blocked|length }} run(s) waiting on you</h2>
+  <p class="sub">Answer them together — each one releases its run immediately.</p>
+  <p class="mt-4"><a class="btn" href="/actions">Clear them now →</a></p>
+  {% if held %}
+  <p class="hint mt-3">{{ held }} of these is holding a live browser window open.
+    Those must be resolved in that window; the rest resume on their own.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Jobs</h2>
+  {% if jobs %}
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>Kind</th><th>Posting</th><th>Status</th><th>Detail</th><th></th></tr>
+    {% for job in jobs %}
+    <tr>
+      <td class="mono">{{ job.id }}</td>
+      <td>{{ job.kind }}</td>
+      <td>
+        {% if job.application %}
+        <a href="/applications/{{ job.application.id }}">{{ job.application.company }} —
+          {{ job.application.role_title }}</a>
+        {% else %}
+        <span class="mono">{{ job.job_url[:58] }}</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if job.status.value == 'Blocked' %}
+          <span class="pill pill-warn">Needs you</span>
+          {% if job.holds_browser %}<span class="pill pill-bad">holding browser</span>{% endif %}
+        {% elif job.status.value == 'Running' %}<span class="pill pill-good">Running</span>
+        {% elif job.status.value == 'Done' %}<span class="pill pill-good">Done</span>
+        {% elif job.status.value in ('Failed', 'Cancelled') %}
+          <span class="pill pill-bad">{{ job.status.value }}</span>
+        {% else %}<span class="pill pill-mute">{{ job.status.value }}</span>{% endif %}
+      </td>
+      <td class="fs-sm">{{ job.message[:80] }}</td>
+      <td>
+        {% if job.status.value in ('Queued', 'Running', 'Blocked', 'Ready') %}
+        <form method="post" action="/queue/{{ job.id }}/cancel">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn-ghost btn-sm" type="submit">Cancel</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="empty">Queue is empty. Paste postings on the
+    <a href="/applications">Applications</a> page — one URL per line to batch them.</p>
+  {% endif %}
+</div>
+{% endblock %}

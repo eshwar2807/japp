@@ -18,6 +18,26 @@ from database.db_manager import DBManager
 from database.models import ActionKind, ActionStatus, ApplicationStatus
 
 GOOD_PASSWORD = "Correct-Horse-9x!"
+
+
+def _ready_profile() -> dict:
+    """The minimum profile that passes the completeness gate."""
+    from web.profile_form import blank_profile
+
+    profile = blank_profile()
+    profile["contact"].update(full_name="Ada Lovelace", email="ada@example.com",
+                              phone="+1-555-010-0100")
+    profile["contact"]["location"]["city"] = "Austin"
+    profile["summary"] = "Backend engineer."
+    profile["skills"]["hard"] = ["Python"]
+    profile["experience"] = [{"company": "Analytical Engines", "title": "Engineer",
+                              "start_date": "2020-01", "is_current": True,
+                              "bullets": ["Did a thing."]}]
+    profile["education"] = [{"institution": "University of London"}]
+    profile["legal"].update(work_authorization_us="Yes",
+                            requires_sponsorship_now_or_future="No",
+                            earliest_start_date="2026-09-01", desired_salary="185000")
+    return profile
 OTHER_PASSWORD = "Battery-Staple-7z!"
 
 
@@ -445,3 +465,155 @@ def test_cost_chart_scales_bars_to_the_peak(web):
     classes = re.findall(r'<i class="h(\d+)"></i>', web.get("/costs?days=30").text)
     assert classes, "chart emitted no bars"
     assert max(int(c) for c in classes) == 100, "peak day must fill the chart"
+
+
+# ---------------- batch queue routes ----------------
+
+
+def test_batch_paste_enqueues_one_job_per_url(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    response = web.post("/applications/new", data={
+        "job_url": "https://boards.greenhouse.io/a/jobs/1\n"
+                   "https://jobs.lever.co/b/xyz\n"
+                   "   \n"
+                   "not-a-url",
+        "csrf_token": csrf(web)})
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/queue")
+
+    jobs = web.db.list_jobs(user_id=user.id)
+    assert len(jobs) == 2, "only the two valid URLs should be queued"
+    assert len({j.batch_id for j in jobs}) == 1, "a paste is one batch"
+    assert all(j.status.value == "Queued" for j in jobs)
+
+
+def test_single_url_keeps_the_pasted_job_description(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    web.post("/applications/new", data={
+        "job_url": "https://boards.greenhouse.io/a/jobs/1",
+        "job_description": "Python, Kubernetes, REST APIs.",
+        "csrf_token": csrf(web)})
+
+    job = web.db.list_jobs(user_id=user.id)[0]
+    assert job.job_description == "Python, Kubernetes, REST APIs."
+    assert job.batch_id is None
+
+
+def test_batch_size_is_capped(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    urls = "\n".join(f"https://x.com/j/{i}" for i in range(40))
+    response = web.post("/applications/new", data={"job_url": urls, "csrf_token": csrf(web)})
+    assert "at+most" in response.headers["location"].replace("%20", "+")
+    assert web.db.list_jobs(user_id=user.id) == []
+
+
+def test_queueing_requires_a_complete_profile(web):
+    signup(web, "ada@example.com")
+    response = web.post("/applications/new", data={
+        "job_url": "https://x.com/j/1", "csrf_token": csrf(web)})
+    assert response.headers["location"].startswith("/profile")
+
+
+def test_queue_page_lists_jobs_and_blocks(web):
+    from database.models import BlockMode
+
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    job = web.db.enqueue_job(user.id, job_url="https://boards.greenhouse.io/a/jobs/1")
+    web.db.block_job(job.id, BlockMode.NEEDS_BROWSER, "verification challenge",
+                     holds_browser=True)
+
+    page = web.get("/queue").text
+    assert "Needs you" in page and "holding browser" in page
+
+
+def test_queue_is_scoped_to_its_owner(web):
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    web.db.enqueue_job(ada.id, job_url="https://secret.example.com/job/1")
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    assert "secret.example.com" not in other.get("/queue").text
+
+
+def test_cancelling_another_users_job_is_refused(web):
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    job = web.db.enqueue_job(ada.id, job_url="https://x.com/1")
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    other.get("/")
+    response = other.post(f"/queue/{job.id}/cancel",
+                          data={"csrf_token": other.cookies.get("jp_csrf")})
+    assert response.headers["location"].startswith("/queue")
+    assert web.db.get_job(job.id).status.value == "Queued"
+
+
+# ---------------- notification settings ----------------
+
+
+def test_notification_preferences_round_trip(web):
+    signup(web, "ada@example.com")
+    web.post("/settings/notifications", data={
+        "notify_desktop": "on",
+        "notify_webhook_url": "https://ntfy.sh/my-topic",
+        "notify_quiet_seconds": "300",
+        "csrf_token": csrf(web)})
+
+    user = web.db.get_user_by_email("ada@example.com")
+    assert user.notify_desktop is True
+    assert user.notify_webhook_url == "https://ntfy.sh/my-topic"
+    assert user.notify_quiet_seconds == 300
+
+
+def test_webhook_url_must_be_http(web):
+    signup(web, "ada@example.com")
+    response = web.post("/settings/notifications", data={
+        "notify_webhook_url": "file:///etc/passwd", "csrf_token": csrf(web)})
+    assert "error=" in response.headers["location"]
+    assert web.db.get_user_by_email("ada@example.com").notify_webhook_url is None
+
+
+def test_quiet_window_is_clamped(web):
+    signup(web, "ada@example.com")
+    web.post("/settings/notifications", data={
+        "notify_quiet_seconds": "999999", "csrf_token": csrf(web)})
+    assert web.db.get_user_by_email("ada@example.com").notify_quiet_seconds == 3600
+
+
+# ---------------- queue API ----------------
+
+
+def test_api_exposes_the_queue(api_client):
+    auth = {"Authorization": f"Bearer {api_client.raw_key}"}
+    api_client.db.enqueue_job(api_client.user.id, job_url="https://x.com/1")
+
+    body = api_client.get("/api/v1/queue", headers=auth).json()
+    assert body["summary"]["Queued"] == 1
+    assert body["jobs"][0]["job_url"] == "https://x.com/1"
+
+
+def test_api_queue_rejects_an_unknown_status(api_client):
+    auth = {"Authorization": f"Bearer {api_client.raw_key}"}
+    assert api_client.get("/api/v1/queue?status=Nonsense", headers=auth).status_code == 400
+
+
+def test_api_cannot_read_another_users_job(api_client):
+    other = api_client.db.create_user("eve@example.com", "$argon2id$fake")
+    job = api_client.db.enqueue_job(other.id, job_url="https://x.com/1")
+    auth = {"Authorization": f"Bearer {api_client.raw_key}"}
+    assert api_client.get(f"/api/v1/queue/{job.id}", headers=auth).status_code == 404

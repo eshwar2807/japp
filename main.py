@@ -264,8 +264,12 @@ def cmd_apply(args) -> int:
         import json
 
         resume = TailoredResumeSchema.model_validate(json.loads(app.tailored_payload or "{}"))
-        pdf_path = Path(app.resume_pdf_path or "")
-        if not pdf_path.exists():
+        # `Path("")` is `Path(".")` and would pass an exists() check.
+        if not app.resume_pdf_path:
+            say("[red]This application has no resume yet.[/] Re-run `tailor`.")
+            return 2
+        pdf_path = Path(app.resume_pdf_path)
+        if not pdf_path.is_file():
             say(f"[red]Resume PDF missing:[/] {pdf_path}. Re-run `tailor`.")
             return 2
         say(f"Using prepared application #{app.id}: {app.role_title} @ {app.company}")

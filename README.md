@@ -6,7 +6,8 @@ PDF, drives the application form in a real browser, and learns from outcomes.
 ```
 web/        app.py               — FastAPI dashboard (auth, CSP, CSRF, rate limits)
             security.py          — Argon2 passwords, API keys, sessions, limiter
-            runner.py            — background pipeline jobs
+            queue_worker.py      — batch queue; parking frees a slot
+            runner.py            — pipeline job bodies
             routes/              — HTML pages + JSON API
 config/     master_profile.json  — canonical, immutable source of truth
             settings.py          — every tunable in one place
@@ -18,6 +19,7 @@ engine/     schemas.py           — Pydantic contracts
             screener_mapper.py   — deterministic form-field answering
 automation/ stealth_browser.py   — Playwright wrapper, human-paced, human-gated
             gatekeeper.py        — where the pipeline asks a human
+            notifier.py          — desktop + webhook alerts when a run parks
             ats_drivers/         — base + workday + greenhouse/lever
 templates/  resume_template.html — single-column, parser-friendly
 main.py     CLI orchestrator
@@ -56,7 +58,8 @@ there. The dashboard covers:
 |---|---|
 | **Overview** | Readiness, response rate, spend today, what needs you |
 | **Applications** | Every posting; open one for the job link, the tailored resume, the exact screener answers submitted, the portal account, and the run log |
-| **Needs you** | The queue — unanswerable questions, verification challenges, approvals. Answers marked *remember* are reused on every later application |
+| **Queue** | Batch progress: what is running, what is parked, what is holding a browser |
+| **Needs you** | Unanswerable questions, verification challenges, approvals. Answering releases the parked run immediately; answers marked *remember* are reused on every later application |
 | **Costs** | Daily spend over 30/90/120/360 days, split by model and pipeline step, plus cost per application |
 | **Logs** | Every pipeline event, filterable by level |
 | **Settings** | Anthropic key (encrypted), dashboard API key, stored portal credentials, password |
@@ -80,6 +83,32 @@ there. The dashboard covers:
 Bind to loopback unless you have HTTPS in front of it — this app holds a
 credential vault.
 
+## Batching
+
+Paste several postings on the Applications page, one URL per line. Each runs
+until it needs you, then **steps aside so the next one starts** — a block never
+stalls the batch. You come back once and clear everything in one sitting.
+
+Two kinds of block, because they cost different things:
+
+| | What happens | Resume |
+|---|---|---|
+| **Needs an answer** | A field the pipeline will not guess. The browser closes and the slot frees. | Re-runs from the top with your answer. You stay logged in via the persistent profile, and the answer is reused on every later application. |
+| **Needs the browser** | A verification challenge, login, or final submit approval. Only resolvable in the live window, so the session is held open. | Continues from exactly where it stopped. Capped at 3 held sessions. |
+
+Answering in the dashboard releases the run straight away — no polling, no
+restart. Dismissing an item cancels the run waiting on it.
+
+### Notifications
+
+Enable in Settings so you can walk away from a batch:
+
+- **Desktop** — a local OS notification. Nothing leaves the machine.
+- **Webhook** — optional, for ntfy/Slack/Discord. Sends only *what* is blocking
+  and a link. Never the posting, your resume, form answers, or credentials.
+- **Quiet window** — one alert per window (default 120s), so a ten-item batch
+  does not fire ten times.
+
 ## JSON API
 
 ```bash
@@ -88,8 +117,8 @@ curl -H "Authorization: Bearer $JP_KEY" http://127.0.0.1:8000/api/v1/costs?days=
 ```
 
 `/api/v1`: `me`, `applications` (GET/POST), `applications/{id}`,
-`applications/{id}/feedback`, `actions`, `actions/{id}/answer`, `costs`, `logs`,
-`runs/{id}`.
+`applications/{id}/feedback`, `actions`, `actions/{id}/answer`, `queue`,
+`queue/{id}`, `queue/{id}/cancel`, `costs`, `logs`.
 
 ## CLI
 
@@ -180,7 +209,7 @@ passwords are unrecoverable, which is the intent.
 | `screener_answers: dict[str, str]` | list of pairs on the wire | Strict JSON schema requires `additionalProperties: false`, which forbids free-form dict keys. `TailoredResumeSchema.screener_answers` is still a `dict[str, str]`. |
 | `playwright-stealth` | not used | See the safety model above. |
 | Automated account registration | form filled, human confirms | Same. |
-| CAPTCHA solving / solver-service integration | not implemented | These checks exist to establish a human is present. The run parks and asks you instead. |
+| CAPTCHA solving / solver-service integration | not implemented | These checks exist to establish a human is present. The run parks and asks you instead — see Batching. |
 
 ## Tests
 
@@ -188,10 +217,12 @@ passwords are unrecoverable, which is the intent.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-195 tests, no API credit spent — the LLM is stubbed throughout.
+234 tests, no API credit spent — the LLM is stubbed throughout.
 
 The browser tests drive a real headless Chromium against fixture pages
 reproducing Greenhouse and Workday label patterns, including an iframe-embedded
 form; they skip automatically if Chromium isn't installed. The web tests attack
 each control directly: cross-tenant reads, forged sessions, missing CSRF tokens,
 revoked API keys, and inline styles that a strict CSP would silently discard.
+The queue tests assert the property the batch depends on: with a single worker
+slot, a parked job must not stop the next one from starting.

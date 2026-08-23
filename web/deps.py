@@ -45,6 +45,14 @@ def get_limiter() -> RateLimiter:
     return RateLimiter()
 
 
+@functools.lru_cache(maxsize=1)
+def get_worker():
+    """The batch queue worker. One per process; started during app lifespan."""
+    from web.queue_worker import QueueWorker
+
+    return QueueWorker(get_db())
+
+
 def client_ip(request: Request) -> str:
     """Best-effort client address.
 

@@ -11,9 +11,15 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from config import settings
-from database.models import ActionStatus, ApplicationStatus, LogLevel
+from database.models import (
+    ActionStatus,
+    ApplicationStatus,
+    BlockMode,
+    JobStatus,
+    LogLevel,
+)
 from engine.cost_tracker import COST_WINDOWS, PRICING_AS_OF, daily_series, summarize
-from web.deps import CSRFProtected, CurrentUser, Database
+from web.deps import CSRFProtected, CurrentUser, Database, get_worker
 from web.profile_form import (
     DISCLOSURE_FIELDS,
     LEGAL_FIELDS,
@@ -22,9 +28,11 @@ from web.profile_form import (
     parse_profile_form,
 )
 from web.security import CSRF_COOKIE, mask_secret
-from web.runner import runs
 
 router = APIRouter(tags=["dashboard"])
+
+#: Most postings accepted in one paste.
+MAX_BATCH = 25
 
 
 
@@ -35,7 +43,7 @@ def render(request: Request, template: str, user, db, **context) -> HTMLResponse
         "user": user,
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "open_actions": db.count_open_actions(user.id) if user else 0,
-        "active_runs": [r.as_dict() for r in runs.active_for_user(user.id)] if user else [],
+        "queue": db.queue_summary(user.id) if user else {},
         "path": request.url.path,
     }
     return templates.TemplateResponse(request, template, {**base, **context})
@@ -144,12 +152,25 @@ def applications_page(request: Request, user: CurrentUser, db: Database,
 @router.post("/applications/new")
 async def new_application(request: Request, user: CurrentUser, db: Database,
                           _csrf: None = CSRFProtected):
+    """Enqueue one posting, or a whole batch pasted one URL per line."""
+    import secrets
+
     form = await request.form()
-    url = str(form.get("job_url", "")).strip()
+    raw = str(form.get("job_url", ""))
     jd_text = str(form.get("job_description", "")).strip() or None
 
-    if not url.startswith(("http://", "https://")):
-        return _redirect("/applications", error="Enter a valid job posting URL.")
+    urls, invalid = [], []
+    for line in raw.replace(",", "\n").splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        (urls if candidate.startswith(("http://", "https://")) else invalid).append(candidate)
+
+    if not urls:
+        return _redirect("/applications", error="Enter at least one job posting URL.")
+    if len(urls) > MAX_BATCH:
+        return _redirect("/applications",
+                         error=f"Queue at most {MAX_BATCH} postings at a time.")
 
     profile = db.get_profile(user.id)
     if not profile or not completeness(profile)["ready"]:
@@ -157,8 +178,18 @@ async def new_application(request: Request, user: CurrentUser, db: Database,
     if not db.get_anthropic_key(user.id) and not settings.ANTHROPIC_API_KEY:
         return _redirect("/settings", error="Add your Anthropic API key first.")
 
-    runs.submit_tailor(db, user.id, url, jd_text)
-    return _redirect("/applications", ok="Tailoring started. Watch the logs for progress.")
+    # A pasted job description only makes sense for a single posting.
+    batch_id = secrets.token_urlsafe(8) if len(urls) > 1 else None
+    for url in urls:
+        db.enqueue_job(user.id, kind="tailor", job_url=url,
+                       job_description=jd_text if len(urls) == 1 else None,
+                       batch_id=batch_id)
+
+    db.log_event(user.id, "queued", f"Queued {len(urls)} posting(s) for tailoring")
+    note = f"Queued {len(urls)} posting(s)."
+    if invalid:
+        note += f" Skipped {len(invalid)} line(s) that were not http(s) URLs."
+    return _redirect("/queue", ok=note)
 
 
 @router.get("/applications/{app_id}", response_class=HTMLResponse)
@@ -185,7 +216,7 @@ def application_detail(request: Request, user: CurrentUser, db: Database, app_id
         actions=db.list_actions(user_id=user.id, status=None, application_id=app_id),
         logs=db.list_logs(user_id=user.id, application_id=app_id, limit=100),
         statuses=list(ApplicationStatus),
-        resume_exists=bool(app.resume_pdf_path and Path(app.resume_pdf_path).exists()),
+        resume_exists=bool(app.resume_pdf_path and Path(app.resume_pdf_path).is_file()),
         ok=ok, error=error,
     )
 
@@ -211,9 +242,9 @@ def run_apply(request: Request, user: CurrentUser, db: Database, app_id: int,
     app = db.get_application(app_id, user_id=user.id)
     if app is None:
         return _redirect("/applications", error="Application not found.")
-    runs.submit_apply(db, user.id, app_id)
-    return _redirect(f"/applications/{app_id}",
-                     ok="Browser session starting. Anything needing you appears in Actions.")
+    db.enqueue_job(user.id, kind="apply", job_url=app.job_url, application_id=app_id)
+    return _redirect("/queue",
+                     ok="Queued. Anything needing you will appear under Needs you.")
 
 
 @router.get("/applications/{app_id}/resume")
@@ -222,9 +253,58 @@ def download_resume(request: Request, user: CurrentUser, db: Database, app_id: i
     if app is None or not app.resume_pdf_path:
         return _redirect("/applications", error="Resume not found.")
     path = Path(app.resume_pdf_path)
-    if not path.exists():
+    if not path.is_file():
         return _redirect(f"/applications/{app_id}", error="Resume file is missing on disk.")
     return FileResponse(path, media_type="application/pdf", filename=path.name)
+
+
+# --------------------------------------------------------------------------
+# Batch queue
+# --------------------------------------------------------------------------
+
+
+@router.get("/queue", response_class=HTMLResponse)
+def queue_page(request: Request, user: CurrentUser, db: Database,
+               ok: str = "", error: str = ""):
+    jobs = db.list_jobs(user_id=user.id, limit=200)
+    summary = db.queue_summary(user.id)
+    blocked = [j for j in jobs if j.status is JobStatus.BLOCKED]
+    return render(
+        request, "queue.html", user, db,
+        jobs=jobs, summary=summary, blocked=blocked,
+        held=sum(1 for j in blocked if j.holds_browser),
+        max_held=_max_held(),
+        ok=ok, error=error,
+    )
+
+
+def _desktop_available() -> bool:
+    from automation.notifier import DesktopChannel
+
+    return DesktopChannel().available()
+
+
+def _max_held() -> int:
+    from web.queue_worker import MAX_HELD_BROWSERS
+
+    return MAX_HELD_BROWSERS
+
+
+@router.post("/queue/{job_id}/cancel")
+def cancel_job(request: Request, user: CurrentUser, db: Database, job_id: int,
+               _csrf: None = CSRFProtected):
+    if db.get_job(job_id, user_id=user.id) is None:
+        return _redirect("/queue", error="Job not found.")
+    get_worker().registry.cancel(job_id)
+    db.cancel_job(job_id, user_id=user.id)
+    return _redirect("/queue", ok=f"Job #{job_id} cancelled.")
+
+
+@router.post("/queue/clear-finished")
+def clear_finished(request: Request, user: CurrentUser, db: Database,
+                   _csrf: None = CSRFProtected):
+    removed = db.purge_finished_jobs(user.id)
+    return _redirect("/queue", ok=f"Cleared {removed} finished job(s).")
 
 
 # --------------------------------------------------------------------------
@@ -238,9 +318,22 @@ def actions_page(request: Request, user: CurrentUser, db: Database,
     status = {"open": ActionStatus.OPEN, "answered": ActionStatus.ANSWERED,
               "all": None}.get(show, ActionStatus.OPEN)
     items = db.list_actions(user_id=user.id, status=status, limit=200)
+    blocked_jobs = {
+        job.blocking_action_id: job
+        for job in db.list_jobs(user_id=user.id, statuses=(JobStatus.BLOCKED,))
+    }
     for item in items:
         item.options = json.loads(item.options_json) if item.options_json else []
+        job = blocked_jobs.get(item.id)
+        # Surfaced so you can tell what is merely informational from what is
+        # actually holding a run (and a browser window) open.
+        item.blocking_job = job
+        item.holds_browser = bool(job and job.holds_browser)
+
+    open_count = db.count_open_actions(user.id)
     return render(request, "actions.html", user, db, items=items, show=show,
+                  open_count=open_count, blocked_count=len(blocked_jobs),
+                  held_count=sum(1 for j in blocked_jobs.values() if j.holds_browser),
                   ok=ok, error=error)
 
 
@@ -251,15 +344,28 @@ def answer_action(request: Request, user: CurrentUser, db: Database, action_id: 
     db.answer_action(action_id, answer.strip(),
                      remember=str(remember).lower() in ("on", "true", "1"),
                      user_id=user.id)
-    db.log_event(user.id, "action_answered", f"#{action_id}: {answer[:120]}")
-    return _redirect("/actions", ok="Answer saved. A paused run will pick it up.")
+    resumed = get_worker().release_action(action_id, answer.strip())
+    db.log_event(user.id, "action_answered",
+                 f"#{action_id}: {answer[:120]} (resumed {resumed} job(s))")
+
+    remaining = db.count_open_actions(user.id)
+    note = "Answer saved."
+    if resumed:
+        note += f" Resumed {resumed} job(s)."
+    if remaining:
+        note += f" {remaining} item(s) still waiting."
+    return _redirect("/actions", ok=note)
 
 
 @router.post("/actions/{action_id}/dismiss")
 def dismiss_action(request: Request, user: CurrentUser, db: Database, action_id: int,
                    _csrf: None = CSRFProtected):
     db.dismiss_action(action_id, user_id=user.id)
-    return _redirect("/actions", ok="Dismissed.")
+    # A job parked on this action would otherwise wait out its whole timeout.
+    for job in db.jobs_blocked_on_action(action_id):
+        get_worker().registry.cancel(job.id)
+        db.cancel_job(job.id, user_id=user.id)
+    return _redirect("/actions", ok="Dismissed; any job waiting on it was cancelled.")
 
 
 # --------------------------------------------------------------------------
@@ -339,6 +445,8 @@ def settings_page(request: Request, user: CurrentUser, db: Database,
         anthropic_key_preview=mask_secret(stored) if stored else "",
         has_anthropic_key=bool(stored),
         api_key_prefix=user.api_key_prefix,
+        notifications=db.list_notifications(user.id, limit=8),
+        desktop_available=_desktop_available(),
         api_key_created=user.api_key_created_at,
         new_key=new_key,
         credentials=credentials,
@@ -357,6 +465,47 @@ def save_anthropic_key(request: Request, user: CurrentUser, db: Database,
     db.log_event(user.id, "anthropic_key",
                  "API key stored (encrypted)" if key else "API key removed")
     return _redirect("/settings", ok="API key saved." if key else "API key removed.")
+
+
+@router.post("/settings/notifications")
+def save_notifications(request: Request, user: CurrentUser, db: Database,
+                       notify_desktop: str = Form(""),
+                       notify_webhook_url: str = Form(""),
+                       notify_quiet_seconds: str = Form("120"),
+                       _csrf: None = CSRFProtected):
+    url = notify_webhook_url.strip()
+    if url and not url.startswith(("http://", "https://")):
+        return _redirect("/settings", error="Webhook URL must start with http:// or https://")
+    try:
+        quiet = max(0, min(int(notify_quiet_seconds or 0), 3600))
+    except ValueError:
+        quiet = 120
+
+    db.update_user(
+        user.id,
+        notify_desktop=str(notify_desktop).lower() in ("on", "true", "1"),
+        notify_webhook_url=url or None,
+        notify_quiet_seconds=quiet,
+    )
+    db.log_event(user.id, "notify_settings", "Notification preferences updated")
+    return _redirect("/settings", ok="Notification settings saved.")
+
+
+@router.post("/settings/notifications/test")
+def test_notification(request: Request, user: CurrentUser, db: Database,
+                      _csrf: None = CSRFProtected):
+    from automation.notifier import Notice, Notifier
+
+    delivered = Notifier(db).notify(
+        db.get_user(user.id),
+        Notice(title="Job pipeline: test",
+               body="If you can see this, notifications are working.",
+               url="/queue"),
+    )
+    if delivered:
+        return _redirect("/settings", ok=f"Test sent via {', '.join(delivered)}.")
+    return _redirect("/settings",
+                     error="Nothing was delivered. Check the channels below and the log.")
 
 
 @router.post("/settings/api-key")

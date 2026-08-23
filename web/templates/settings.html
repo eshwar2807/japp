@@ -60,6 +60,58 @@
 </div>
 
 <div class="card">
+  <h2>Notifications</h2>
+  <p class="sub">Told when a run parks, so you can walk away from a batch and come
+    back once. Desktop alerts stay on this machine. The webhook is optional and
+    sends only what is blocking and a link — never the posting, your resume, form
+    answers or credentials.</p>
+
+  <form method="post" action="/settings/notifications" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="check mb-4">
+      <input type="checkbox" name="notify_desktop" {{ 'checked' if user.notify_desktop }}>
+      Desktop notifications
+      {% if not desktop_available %}
+      <span class="pill pill-warn">unavailable on this system</span>
+      {% endif %}
+    </label>
+    <div class="field"><label for="notify_webhook_url">Webhook URL (optional)</label>
+      <input id="notify_webhook_url" type="url" name="notify_webhook_url"
+             value="{{ user.notify_webhook_url or '' }}"
+             placeholder="https://ntfy.sh/your-topic">
+      <p class="hint">Works with ntfy, Slack and Discord incoming webhooks.</p></div>
+    <div class="field"><label for="notify_quiet_seconds">Quiet window (seconds)</label>
+      <input id="notify_quiet_seconds" type="number" name="notify_quiet_seconds"
+             value="{{ user.notify_quiet_seconds }}" min="0" max="3600">
+      <p class="hint">One alert per window, so a ten-item batch does not fire ten times.</p></div>
+    <div class="actions-row">
+      <button type="submit">Save notifications</button>
+    </div>
+  </form>
+
+  <form method="post" action="/settings/notifications/test" class="mt-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn-ghost btn-sm" type="submit">Send a test notification</button>
+  </form>
+
+  {% if notifications %}
+  <h3 class="mt-5">Recently sent</h3>
+  <div class="table-wrap"><table>
+    <tr><th>When</th><th>Channel</th><th>Title</th><th>Result</th></tr>
+    {% for note in notifications %}
+    <tr>
+      <td class="muted">{{ note.created_at.strftime('%b %d %H:%M') }}</td>
+      <td class="mono">{{ note.channel }}</td>
+      <td>{{ note.title }}</td>
+      <td>{% if note.delivered %}<span class="pill pill-good">sent</span>
+          {% else %}<span class="pill pill-bad" title="{{ note.error }}">failed</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>Portal credentials</h2>
   <p class="sub">Accounts created on ATS portals. Passwords are Fernet-encrypted;
     revealing one is logged.</p>

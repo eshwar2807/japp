@@ -216,6 +216,13 @@ class User(Base):
     #: Bumped on password change / "log out everywhere"; invalidates old sessions.
     session_epoch: Mapped[int] = mapped_column(Integer, default=1)
 
+    #: Notification preferences. The webhook is opt-in and user-supplied; only
+    #: a job reference and the reason are ever sent, never form or profile data.
+    notify_desktop: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_webhook_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: Suppress repeat notifications for the same batch within this many seconds.
+    notify_quiet_seconds: Mapped[int] = mapped_column(Integer, default=120)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -365,3 +372,125 @@ class RunLog(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<RunLog {self.level.value} {self.event}>"
+
+
+# ==========================================================================
+# Batch queue
+# ==========================================================================
+
+
+class JobStatus(str, enum.Enum):
+    """Lifecycle of one queued pipeline job.
+
+    BLOCKED is the state that makes batching work: the job has hit something
+    only a human can resolve, has released its worker slot, and is waiting.
+    READY means the human has answered and the job may resume.
+    """
+
+    QUEUED = "Queued"
+    RUNNING = "Running"
+    BLOCKED = "Blocked"
+    READY = "Ready"
+    DONE = "Done"
+    FAILED = "Failed"
+    CANCELLED = "Cancelled"
+
+
+#: Terminal states; a job in one of these is never picked up again.
+TERMINAL_JOB_STATUSES = (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED)
+
+
+class BlockMode(str, enum.Enum):
+    """What a blocked job needs in order to continue.
+
+    NEEDS_ANSWER  - a value the pipeline could not determine. The browser is
+                    closed and the job resumes from scratch once answered,
+                    which is cheap and survives a restart.
+    NEEDS_BROWSER - a human-verification or login challenge that must be
+                    cleared in the live window. The session is held open, so
+                    these are capped.
+    """
+
+    NONE = "None"
+    NEEDS_ANSWER = "Needs answer"
+    NEEDS_BROWSER = "Needs browser"
+
+
+class RunJob(Base):
+    """One unit of queued work: tailor a posting, or apply to one."""
+
+    __tablename__ = "run_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    application_id: Mapped[int | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: Groups jobs enqueued together, so a batch can be tracked as a unit.
+    batch_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
+    kind: Mapped[str] = mapped_column(String(16), default="tailor")   # tailor | apply
+    job_url: Mapped[str] = mapped_column(String(1024), default="")
+    job_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    status: Mapped[JobStatus] = mapped_column(
+        SAEnum(JobStatus, values_callable=lambda e: [m.value for m in e]),
+        default=JobStatus.QUEUED,
+        index=True,
+    )
+    block_mode: Mapped[BlockMode] = mapped_column(
+        SAEnum(BlockMode, values_callable=lambda e: [m.value for m in e]),
+        default=BlockMode.NONE,
+    )
+    #: The action item the human must resolve before this job can continue.
+    blocking_action_id: Mapped[int | None] = mapped_column(
+        ForeignKey("action_items.id", ondelete="SET NULL"), nullable=True
+    )
+    #: True while a live browser context is held open for this job.
+    holds_browser: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    message: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    application: Mapped["Application | None"] = relationship()
+    blocking_action: Mapped["ActionItem | None"] = relationship()
+
+    __table_args__ = (Index("ix_job_user_status", "user_id", "status"),)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_JOB_STATUSES
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<RunJob #{self.id} {self.kind} {self.status.value}>"
+
+
+class Notification(Base):
+    """A dispatched notification, kept so the UI can show what was sent."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("run_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    channel: Mapped[str] = mapped_column(String(24), default="desktop")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<Notification {self.channel} {'ok' if self.delivered else 'failed'}>"
