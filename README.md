@@ -25,6 +25,62 @@ templates/  resume_template.html — single-column, parser-friendly
 main.py     CLI orchestrator
 ```
 
+## Hosted at https://japp.fly.dev
+
+The dashboard runs on Fly.io; the browser work runs on your machine. That split
+is deliberate: clearing a verification challenge means looking at a real browser
+window, and a container in a datacenter has none. Hosting the whole pipeline
+would make every such block unresolvable, and datacenter IPs draw more
+bot-detection than a home connection.
+
+| Runs on Fly | Runs on your Mac |
+|---|---|
+| Dashboard, profile, queue, action history, costs, logs, feedback, API | Application form-filling (`apply` jobs) |
+| Resume tailoring, PDF rendering, job-description fetch | The browser window you clear challenges in |
+
+`JP_WORKER_KINDS=tailor` enforces it: the hosted worker will not claim an
+`apply` job, so a browser never starts where nobody can see it.
+
+### The local agent
+
+```bash
+export JP_AGENT_KEY=$(cat ~/.japp-key)     # from Settings -> Dashboard API key
+python -m agent --server https://japp.fly.dev
+```
+
+It claims apply jobs, drives the browser locally, and reports blocks back to the
+dashboard — so you can answer from your phone while the window waits on your
+desk. It refuses to send the API key over plain HTTP to a remote host, and reads
+the key from the environment or a file rather than argv (arguments are visible
+to every process via `ps`).
+
+### Operating it
+
+```bash
+fly logs --app japp                       # live logs
+fly status --app japp                     # machine health
+fly ssh console --app japp                # shell in the container
+fly secrets set JP_INVITE_CODE=... --app japp   # rotate the invite code
+fly deploy --app japp                     # ship a change
+```
+
+State lives on a 1GB encrypted volume at `/data`: the database and generated
+PDFs. The Fernet vault key and session key come from Fly secrets and are never
+written to the volume, so a volume snapshot leaks neither.
+
+Single machine on purpose — the SQLite database, the queue and any parked
+sessions share one process. Two machines would mean two queues fighting over
+one volume, so `auto_stop_machines` is off and `min_machines_running` is 1.
+
+### Access
+
+Signup requires an invite code (`JP_INVITE_CODE`). The code is compared with
+`hmac.compare_digest` and checked before anything else, so a wrong code cannot
+be used to probe which addresses are registered. The account matching
+`JP_ADMIN_EMAIL`, or the first account created, gets `/admin`: accounts,
+activity, spend, and suspend/restore. That view deliberately shows whether a
+user has keys set, never their values, and never another user's profile.
+
 ## Setup
 
 ```bash
