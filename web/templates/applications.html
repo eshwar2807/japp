@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Applications{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Applications</h1><p class="sub">Every posting you have tailored for.</p></div>
+</div>
+
+<div class="card">
+  <h2>Tailor a new application</h2>
+  <form method="post" action="/applications/new">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><label for="job_url">Job posting URL</label>
+      <input id="job_url" type="url" name="job_url" required
+             placeholder="https://boards.greenhouse.io/acme/jobs/123"></div>
+    <div class="field"><label for="job_description">Job description (optional)</label>
+      <textarea id="job_description" name="job_description"
+        placeholder="Paste the posting text here. More reliable than scraping when the page needs JavaScript."></textarea>
+      <p class="hint">Leave blank to fetch the page automatically.</p></div>
+    <button type="submit">Tailor resume</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="actions-row mb-4">
+    <a class="btn btn-ghost btn-sm" href="/applications">All</a>
+    {% for status in statuses %}
+    <a class="btn btn-ghost btn-sm{{ ' active' if current_status == status.value }}"
+       href="/applications?status={{ status.value }}">{{ status.value }}</a>
+    {% endfor %}
+  </div>
+  {% if applications %}
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>Company</th><th>Role</th><th>Match</th><th>Status</th><th>Created</th><th></th></tr>
+    {% for app in applications %}
+    <tr>
+      <td class="mono">{{ app.id }}</td>
+      <td><a href="/applications/{{ app.id }}">{{ app.company }}</a></td>
+      <td>{{ app.role_title }}</td>
+      <td><span class="pill {{ 'pill-good' if app.match_score >= 80 else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
+      <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
+      <td class="muted">{{ app.created_at.strftime('%b %d') }}</td>
+      <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}<p class="empty">Nothing yet. Tailor your first application above.</p>{% endif %}
+</div>
+{% endblock %}

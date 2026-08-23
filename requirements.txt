@@ -1,0 +1,35 @@
+# --- Core runtime (Python 3.11+) ---
+pydantic>=2.7,<3.0
+python-dotenv>=1.0.1
+
+# --- LLM orchestration ---
+anthropic>=0.40.0
+
+# --- Persistence & security ---
+SQLAlchemy>=2.0.30
+cryptography>=42.0.0
+
+# --- Resume rendering ---
+Jinja2>=3.1.4
+weasyprint>=62.0
+pypdf>=4.2.0              # PDF text-extraction verification            # needs system libs: pango, gdk-pixbuf, libffi
+
+# --- Browser automation ---
+playwright>=1.45.0          # run: playwright install chromium
+
+# --- Keyword / semantic scoring ---
+rapidfuzz>=3.9.0
+
+# --- CLI ---
+rich>=13.7.0
+
+# --- Web dashboard ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9     # form parsing
+itsdangerous>=2.2.0         # signed session cookies
+argon2-cffi>=23.1.0         # password hashing
+httpx>=0.27.0               # TestClient
+
+# --- Dev / test ---
+pytest>=8.2.0

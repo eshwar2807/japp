@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create account · Job Pipeline</title><link rel="stylesheet" href="/static/app.css"><link rel="icon" href="data:,"></head>
+<body><div class="auth"><div class="card">
+  <h1>Create your account</h1>
+  <p class="sub">Everything you store here stays on this machine.</p>
+  {% if error %}<div class="flash flash-err mt-5">{{ error }}</div>{% endif %}
+  <form method="post" action="/signup" class="mt-5">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><label for="email">Email</label>
+      <input id="email" type="email" name="email" value="{{ email or '' }}" required
+             autocomplete="username" autofocus></div>
+    <div class="field"><label for="password">Password</label>
+      <input id="password" type="password" name="password" required autocomplete="new-password">
+      <p class="hint">At least 12 characters, using three of: lowercase, uppercase, digits, symbols.</p></div>
+    <div class="field"><label for="confirm">Confirm password</label>
+      <input id="confirm" type="password" name="confirm" required autocomplete="new-password"></div>
+    <button type="submit" class="full">Create account</button>
+  </form>
+  <p class="hint mt-5">Already have one? <a href="/login">Sign in</a></p>
+</div></div></body></html>

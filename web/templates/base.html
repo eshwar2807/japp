@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Dashboard{% endblock %} · Job Pipeline</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<div class="layout">
+  <nav class="sidebar">
+    <div class="brand">Job Pipeline<small>{{ user.email }}</small></div>
+    <div class="nav">
+      <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
+      <a href="/applications" class="{{ 'active' if path.startswith('/applications') }}">Applications</a>
+      <a href="/actions" class="{{ 'active' if path == '/actions' }}">
+        Needs you {% if open_actions %}<span class="badge">{{ open_actions }}</span>{% endif %}
+      </a>
+      <div class="nav-group">Account</div>
+      <a href="/profile" class="{{ 'active' if path == '/profile' }}">Profile</a>
+      <a href="/settings" class="{{ 'active' if path == '/settings' }}">Settings</a>
+      <div class="nav-group">Monitoring</div>
+      <a href="/costs" class="{{ 'active' if path == '/costs' }}">Costs</a>
+      <a href="/logs" class="{{ 'active' if path == '/logs' }}">Logs</a>
+    </div>
+    <form method="post" action="/logout" class="nav-foot">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn-ghost btn-sm" type="submit">Sign out</button>
+    </form>
+  </nav>
+
+  <main class="main"{% if active_runs %} data-refresh-seconds="6"{% endif %}>
+    {% if active_runs %}
+    <div class="flash flash-warn">
+      {{ active_runs|length }} run(s) in progress — this page refreshes automatically.
+      {% for run in active_runs %}<div class="mono">{{ run.kind }} · {{ run.status }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    {% if ok %}<div class="flash flash-ok">{{ ok }}</div>{% endif %}
+    {% if error %}<div class="flash flash-err">{{ error }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Careers — Apply</title></head>
+<body>
+<h1>Apply: Senior Backend Engineer</h1>
+<form id="application_form">
+
+  <!-- label[for] -->
+  <label for="first_name">First Name *</label>
+  <input type="text" id="first_name" name="job_application[first_name]" required>
+
+  <label for="last_name">Last Name *</label>
+  <input type="text" id="last_name" name="job_application[last_name]" required>
+
+  <!-- aria-label -->
+  <input type="email" id="email" name="email" aria-label="Email Address" required>
+
+  <!-- placeholder fallback -->
+  <input type="tel" id="phone" name="phone" placeholder="Phone Number">
+
+  <!-- wrapping label -->
+  <label>LinkedIn Profile
+    <input type="url" id="linkedin" name="urls[LinkedIn]">
+  </label>
+
+  <!-- aria-labelledby -->
+  <span id="gh-lbl">Are you legally authorized to work in the United States?</span>
+  <select id="work_auth" name="work_auth" aria-labelledby="gh-lbl" required>
+    <option value="">Please select</option>
+    <option value="1">Yes</option>
+    <option value="0">No</option>
+  </select>
+
+  <label for="sponsorship">Will you now or in the future require visa sponsorship? *</label>
+  <select id="sponsorship" name="sponsorship" required>
+    <option value="">-- Select --</option>
+    <option value="1">Yes</option>
+    <option value="0">No</option>
+  </select>
+
+  <!-- fieldset/legend radio group -->
+  <fieldset>
+    <legend>Gender</legend>
+    <label><input type="radio" name="gender" value="m"> Male</label>
+    <label><input type="radio" name="gender" value="f"> Female</label>
+    <label><input type="radio" name="gender" value="d"> I decline to self identify</label>
+  </fieldset>
+
+  <label for="salary">Desired salary</label>
+  <input type="text" id="salary" name="salary">
+
+  <label for="why">Why do you want to work at Acme? *</label>
+  <textarea id="why" name="why" required></textarea>
+
+  <!-- deliberately unanswerable -->
+  <label for="kernel">Describe your favourite kernel scheduler *</label>
+  <textarea id="kernel" name="kernel" required></textarea>
+
+  <label for="resume">Resume/CV *</label>
+  <input type="file" id="resume" name="resume" accept=".pdf,.doc,.docx" required>
+
+  <!-- must be ignored -->
+  <input type="hidden" name="csrf" value="abc123">
+  <input type="text" id="disabled_field" name="disabled_field" disabled>
+  <div style="display:none"><label for="hidden_field">Hidden</label>
+    <input type="text" id="hidden_field" name="hidden_field"></div>
+
+  <label><input type="checkbox" id="agree" name="agree"> I agree to the terms</label>
+
+  <button type="submit" id="submit_app">Submit Application</button>
+</form>
+</body></html>

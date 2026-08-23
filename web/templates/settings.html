@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Settings</h1><p class="sub">Keys, credentials and account security.</p></div>
+</div>
+
+{% if new_key %}
+<div class="card card-good">
+  <h2>Your new API key</h2>
+  <p class="sub">Copy it now — only a hash is stored, so it cannot be shown again.</p>
+  <div class="secret my-3">{{ new_key }}</div>
+  <button class="btn-ghost btn-sm" type="button" data-copy="{{ new_key }}">Copy</button>
+</div>
+{% endif %}
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Anthropic API key</h2>
+    <p class="sub">Used for resume tailoring. Encrypted with Fernet before storage and
+      never rendered back in full.</p>
+    {% if has_anthropic_key %}
+    <div class="field mt-4"><label>Stored key</label>
+      <div class="secret">{{ anthropic_key_preview }}</div></div>
+    {% endif %}
+    <form method="post" action="/settings/anthropic-key" class="mt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label for="anthropic_key">{{ 'Replace key' if has_anthropic_key else 'API key' }}</label>
+        <input id="anthropic_key" type="password" name="anthropic_key"
+               placeholder="sk-ant-..." autocomplete="off">
+        <p class="hint">Leave blank and save to remove the stored key. Model in use: <span class="mono">{{ model }}</span></p></div>
+      <button type="submit">Save key</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Dashboard API key</h2>
+    <p class="sub">For the JSON API at <span class="mono">/api/v1</span>, sent as
+      <span class="mono">Authorization: Bearer …</span></p>
+    {% if api_key_prefix %}
+    <div class="field mt-4"><label>Active key</label>
+      <div class="secret">{{ api_key_prefix }}…</div>
+      <p class="hint">Created {{ api_key_created.strftime('%b %d, %Y') if api_key_created else '—' }}</p></div>
+    {% else %}
+    <p class="hint mt-4">No API key yet.</p>
+    {% endif %}
+    <div class="actions-row mt-4">
+      <form method="post" action="/settings/api-key">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">{{ 'Rotate key' if api_key_prefix else 'Generate key' }}</button>
+      </form>
+      {% if api_key_prefix %}
+      <form method="post" action="/settings/api-key/revoke">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn-danger btn-sm" type="submit">Revoke</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Portal credentials</h2>
+  <p class="sub">Accounts created on ATS portals. Passwords are Fernet-encrypted;
+    revealing one is logged.</p>
+  {% if credentials %}
+  <div class="table-wrap"><table>
+    <tr><th>Portal</th><th>Username</th><th>Password</th><th>Created</th></tr>
+    {% for cred in credentials %}
+    <tr>
+      <td class="mono">{{ cred.portal_domain }}</td>
+      <td>{{ cred.username_email }}</td>
+      <td>
+        {% if reveal_id == cred.id %}
+        <span class="secret">{{ revealed_password }}</span>
+        {% else %}
+        <form method="post" action="/settings/credentials/{{ cred.id }}/reveal">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn-ghost btn-sm" type="submit">Reveal</button>
+        </form>
+        {% endif %}
+      </td>
+      <td class="muted">{{ cred.created_at.strftime('%b %d, %Y') }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}<p class="empty">No portal accounts stored yet.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Change password</h2>
+  <p class="sub">Changing your password signs out every other session.</p>
+  <form method="post" action="/settings/password" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-row">
+      <div class="field"><label for="current_password">Current password</label>
+        <input id="current_password" type="password" name="current_password" required
+               autocomplete="current-password"></div>
+      <div class="field"><label for="new_password">New password</label>
+        <input id="new_password" type="password" name="new_password" required
+               autocomplete="new-password"></div>
+      <div class="field"><label for="confirm">Confirm</label>
+        <input id="confirm" type="password" name="confirm" required
+               autocomplete="new-password"></div>
+    </div>
+    <button type="submit">Update password</button>
+  </form>
+</div>
+{% endblock %}

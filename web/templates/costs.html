@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Costs{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>LLM costs</h1>
+    <p class="sub">Priced from recorded token usage. Rates as of {{ pricing_as_of }}.</p></div>
+  <div class="actions-row">
+    {% for window in windows %}
+    <a class="btn {{ 'btn-ghost' if window != days }} btn-sm" href="/costs?days={{ window }}">{{ window }}d</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="grid grid-4 mb-6">
+  <div class="stat"><div class="value">{{ summary.total_cost|money }}</div>
+    <div class="label">Total · {{ days }}d</div>
+    <div class="note">{{ summary.total_calls }} calls</div></div>
+  <div class="stat"><div class="value">{{ summary.avg_per_day|money }}</div>
+    <div class="label">Avg / day</div>
+    <div class="note">{{ summary.avg_per_active_day|money }} on active days</div></div>
+  <div class="stat"><div class="value">{{ per_application|money }}</div>
+    <div class="label">Per application</div></div>
+  <div class="stat"><div class="value">{{ summary.total_tokens|tokens }}</div>
+    <div class="label">Tokens</div>
+    <div class="note">{{ summary.active_days }}/{{ summary.days }} active days</div></div>
+</div>
+
+<div class="card">
+  <h2>Daily spend</h2>
+  {% if summary.total_cost %}
+  <div class="chart">
+    {% for entry in series %}
+    <div class="col" title="{{ entry.label }}: ${{ '%.4f'|format(entry.cost) }} · {{ entry.calls }} calls">
+      <i class="h{{ entry.height }}"></i>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="chart-axis">
+    <span>{{ series[0].label }}</span>
+    {% if series|length > 2 %}<span>{{ series[series|length // 2].label }}</span>{% endif %}
+    <span>{{ series[-1].label }}</span>
+  </div>
+  <p class="hint mt-2">Peak: {{ summary.peak_cost|money }}
+    {% if summary.peak_day %}on {{ summary.peak_day }}{% endif %}</p>
+  {% else %}
+  <p class="empty">No spend recorded in this window.</p>
+  {% endif %}
+</div>
+
+<div class="grid grid-2">
+  <div class="card"><h2>By model</h2>
+    {% if by_model %}
+    <div class="table-wrap"><table>
+      <tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr>
+      {% for row in by_model %}
+      <tr><td class="mono">{{ row.model }}</td><td>{{ row.calls }}</td>
+        <td>{{ row.tokens|tokens }}</td><td><strong>{{ row.cost|money }}</strong></td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}<p class="empty">No data.</p>{% endif %}
+  </div>
+
+  <div class="card"><h2>By pipeline step</h2>
+    {% if by_phase %}
+    <div class="table-wrap"><table>
+      <tr><th>Step</th><th>Calls</th><th>Cost</th></tr>
+      {% for row in by_phase %}
+      <tr><td class="mono">{{ row.phase }}</td><td>{{ row.calls }}</td>
+        <td><strong>{{ row.cost|money }}</strong></td></tr>
+      {% endfor %}
+    </table></div>
+    <p class="hint">Retries from a below-target match score show up as extra
+      <span class="mono">tailor</span> calls.</p>
+    {% else %}<p class="empty">No data.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

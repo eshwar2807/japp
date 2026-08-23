@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Job Pipeline</title><link rel="stylesheet" href="/static/app.css"><link rel="icon" href="data:,"></head>
+<body><div class="auth"><div class="card">
+  <h1>Sign in</h1>
+  <p class="sub">Job application pipeline</p>
+  {% if error %}<div class="flash flash-err mt-5">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" class="mt-5">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field"><label for="email">Email</label>
+      <input id="email" type="email" name="email" required autocomplete="username" autofocus></div>
+    <div class="field"><label for="password">Password</label>
+      <input id="password" type="password" name="password" required autocomplete="current-password"></div>
+    <button type="submit" class="full">Sign in</button>
+  </form>
+  {% if allow_signup %}
+  <p class="hint mt-5">No account? <a href="/signup">Create one</a></p>
+  {% endif %}
+</div></div></body></html>

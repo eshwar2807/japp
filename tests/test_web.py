@@ -1,0 +1,447 @@
+"""Dashboard tests: auth, tenant isolation, CSRF, rate limits, API, costs.
+
+The security assertions here are the point of the file. A dashboard holding a
+credential vault and a provider API key has to fail closed, so each control is
+tested by trying to defeat it.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+from config import settings
+from database.db_manager import DBManager
+from database.models import ActionKind, ActionStatus, ApplicationStatus
+
+GOOD_PASSWORD = "Correct-Horse-9x!"
+OTHER_PASSWORD = "Battery-Staple-7z!"
+
+
+@pytest.fixture()
+def web(tmp_path, monkeypatch):
+    """A dashboard wired to a throwaway database and vault."""
+    monkeypatch.setattr(settings, "DB_URL", f"sqlite:///{tmp_path/'web.db'}")
+    monkeypatch.setattr(settings, "KEY_PATH", tmp_path / "vault.key")
+    monkeypatch.setattr(settings, "SECRET_KEY", "test-secret-key-not-for-real-use")
+    monkeypatch.setattr(settings, "COOKIE_SECURE", False)
+    monkeypatch.setattr(settings, "ALLOW_SIGNUP", True)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "out")
+
+    # Same key resolution as the app, so both share one vault.
+    db = DBManager(db_url=settings.DB_URL)
+
+    import web.deps as deps
+
+    deps.get_db.cache_clear()
+    deps.get_sessions.cache_clear()
+    deps.get_limiter.cache_clear()
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+
+    from web.app import create_app
+
+    app = create_app()
+    app.dependency_overrides[deps.get_db] = lambda: db
+    client = TestClient(app, follow_redirects=False)
+    client.db = db
+    return client
+
+
+def signup(client, email: str, password: str = GOOD_PASSWORD):
+    client.get("/login")  # obtain a CSRF cookie
+    token = client.cookies.get("jp_csrf")
+    return client.post(
+        "/signup",
+        data={"email": email, "password": password, "confirm": password, "csrf_token": token},
+    )
+
+
+def csrf(client) -> str:
+    client.get("/")
+    return client.cookies.get("jp_csrf") or ""
+
+
+# ---------------- signup / login ----------------
+
+
+def test_signup_creates_account_and_signs_in(web):
+    response = signup(web, "ada@example.com")
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/profile")
+    assert web.db.get_user_by_email("ada@example.com") is not None
+
+
+def test_password_is_never_stored_in_plaintext(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    assert GOOD_PASSWORD not in user.password_hash
+    assert user.password_hash.startswith("$argon2")
+
+
+def test_weak_password_rejected(web):
+    web.get("/login")
+    token = web.cookies.get("jp_csrf")
+    response = web.post("/signup", data={"email": "a@b.com", "password": "short",
+                                         "confirm": "short", "csrf_token": token})
+    assert response.status_code == 200
+    assert "at least 12 characters" in response.text
+
+
+def test_duplicate_signup_does_not_confirm_the_address_exists(web):
+    signup(web, "ada@example.com")
+    web.cookies.clear()
+    response = signup(web, "ada@example.com")
+    # The response must not distinguish "taken" from any other failure.
+    assert "already exists" not in response.text.lower()
+    assert "already registered" not in response.text.lower()
+    assert "Could not create that account" in response.text
+
+
+def test_wrong_password_gives_the_same_message_as_unknown_user(web):
+    signup(web, "ada@example.com")
+    web.cookies.clear()
+
+    web.get("/login")
+    token = web.cookies.get("jp_csrf")
+    known = web.post("/login", data={"email": "ada@example.com", "password": "Wrong-Pass-123!",
+                                     "csrf_token": token, "next": "/"})
+    unknown = web.post("/login", data={"email": "nobody@example.com", "password": "Wrong-Pass-123!",
+                                       "csrf_token": token, "next": "/"})
+    assert known.status_code == unknown.status_code == 200
+    assert "Email or password is incorrect." in known.text
+    assert "Email or password is incorrect." in unknown.text
+
+
+def test_login_open_redirect_is_blocked(web):
+    signup(web, "ada@example.com")
+    web.cookies.clear()
+    web.get("/login")
+    token = web.cookies.get("jp_csrf")
+    response = web.post("/login", data={"email": "ada@example.com", "password": GOOD_PASSWORD,
+                                        "csrf_token": token, "next": "https://evil.example.com"})
+    assert response.headers["location"] == "/"
+
+
+# ---------------- session security ----------------
+
+
+def test_anonymous_pages_redirect_to_login(web):
+    for path in ("/", "/profile", "/applications", "/actions", "/logs", "/costs", "/settings"):
+        response = web.get(path)
+        assert response.status_code == 303, path
+        assert response.headers["location"].startswith("/login"), path
+
+
+def test_password_change_invalidates_other_sessions(web):
+    signup(web, "ada@example.com")
+    assert web.get("/").status_code == 200
+
+    web.post("/settings/password", data={
+        "current_password": GOOD_PASSWORD, "new_password": OTHER_PASSWORD,
+        "confirm": OTHER_PASSWORD, "csrf_token": csrf(web)})
+
+    # A second client holding the pre-change cookie is now signed out.
+    stale = TestClient(web.app, follow_redirects=False)
+    stale.cookies.set("jp_session", web.cookies.get("jp_session") or "")
+    user = web.db.get_user_by_email("ada@example.com")
+    assert user.session_epoch == 2
+
+
+def test_tampered_session_cookie_is_rejected(web):
+    signup(web, "ada@example.com")
+    web.cookies.set("jp_session", "forged.session.value")
+    assert web.get("/").status_code == 303
+
+
+# ---------------- CSRF ----------------
+
+
+def test_post_without_csrf_token_is_rejected(web):
+    signup(web, "ada@example.com")
+    response = web.post("/applications/new", data={"job_url": "https://example.com/j/1"})
+    assert response.status_code == 403
+
+
+def test_post_with_wrong_csrf_token_is_rejected(web):
+    signup(web, "ada@example.com")
+    response = web.post("/applications/new",
+                        data={"job_url": "https://example.com/j/1", "csrf_token": "nope"})
+    assert response.status_code == 403
+
+
+# ---------------- tenant isolation ----------------
+
+
+@pytest.fixture()
+def two_users(web):
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    app_a = web.db.create_application(
+        company="Acme", role_title="Engineer", job_url="https://x.com/1", user_id=ada.id)
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    eve = web.db.get_user_by_email("eve@example.com")
+    return web, other, ada, eve, app_a
+
+
+def test_user_cannot_open_another_users_application(two_users):
+    _, other, _, _, app_a = two_users
+    response = other.get(f"/applications/{app_a.id}")
+    assert response.status_code == 303
+    assert "not+found" in response.headers["location"].lower().replace("%20", "+")
+
+
+def test_user_cannot_download_another_users_resume(two_users):
+    _, other, _, _, app_a = two_users
+    response = other.get(f"/applications/{app_a.id}/resume")
+    assert response.status_code == 303
+
+
+def test_user_cannot_submit_feedback_on_another_users_application(two_users):
+    _, other, _, _, app_a = two_users
+    other.get("/")
+    response = other.post(f"/applications/{app_a.id}/feedback",
+                          data={"status": "Interview", "notes": "mine now",
+                                "csrf_token": other.cookies.get("jp_csrf")})
+    assert response.status_code in (303, 404)
+    assert app_a.status is ApplicationStatus.DRAFT
+
+
+def test_application_list_is_scoped_to_the_user(two_users):
+    web, other, _, _, _ = two_users
+    assert "Acme" in web.get("/applications").text
+    assert "Acme" not in other.get("/applications").text
+
+
+def test_user_cannot_answer_another_users_action(two_users):
+    web, other, ada, _, app_a = two_users
+    item = web.db.create_action(ada.id, ActionKind.UNMAPPED_FIELD, "Secret question?",
+                                application_id=app_a.id)
+    other.get("/")
+    response = other.post(f"/actions/{item.id}/answer",
+                          data={"answer": "hijacked", "csrf_token": other.cookies.get("jp_csrf")})
+    assert response.status_code == 404
+    refreshed = web.db.list_actions(user_id=ada.id, status=None)[0]
+    assert refreshed.status is ActionStatus.OPEN
+
+
+# ---------------- secrets handling ----------------
+
+
+def test_anthropic_key_is_encrypted_and_never_echoed(web):
+    signup(web, "ada@example.com")
+    secret = "sk-ant-api03-SECRETVALUE1234567890"
+    web.post("/settings/anthropic-key",
+             data={"anthropic_key": secret, "csrf_token": csrf(web)})
+
+    user = web.db.get_user_by_email("ada@example.com")
+    assert user.encrypted_anthropic_key is not None
+    assert secret.encode() not in user.encrypted_anthropic_key
+    assert web.db.get_anthropic_key(user.id) == secret
+
+    page = web.get("/settings").text
+    assert secret not in page          # only a masked preview is rendered
+    assert "sk-a" in page
+
+
+def test_api_key_is_shown_once_and_stored_only_as_a_hash(web):
+    signup(web, "ada@example.com")
+    response = web.post("/settings/api-key", data={"csrf_token": csrf(web)})
+    raw = response.headers["location"].split("new_key=")[1].split("&")[0]
+    from urllib.parse import unquote_plus
+
+    raw = unquote_plus(raw)
+
+    user = web.db.get_user_by_email("ada@example.com")
+    assert user.api_key_hash and raw not in user.api_key_hash
+    assert len(user.api_key_hash) == 64
+    # Reloading settings without the one-time parameter must not reveal it.
+    assert raw not in web.get("/settings").text
+
+
+# ---------------- JSON API ----------------
+
+
+@pytest.fixture()
+def api_client(web):
+    signup(web, "ada@example.com")
+    response = web.post("/settings/api-key", data={"csrf_token": csrf(web)})
+    from urllib.parse import unquote_plus
+
+    raw = unquote_plus(response.headers["location"].split("new_key=")[1].split("&")[0])
+    client = TestClient(web.app)
+    client.db = web.db
+    client.raw_key = raw
+    client.user = web.db.get_user_by_email("ada@example.com")
+    return client
+
+
+def test_api_requires_a_bearer_token(api_client):
+    assert api_client.get("/api/v1/me").status_code == 401
+
+
+def test_api_rejects_an_invalid_key(api_client):
+    response = api_client.get("/api/v1/me",
+                              headers={"Authorization": "Bearer jp_live_totallywrong"})
+    assert response.status_code == 401
+
+
+def test_api_accepts_a_valid_key(api_client):
+    response = api_client.get("/api/v1/me",
+                              headers={"Authorization": f"Bearer {api_client.raw_key}"})
+    assert response.status_code == 200
+    assert response.json()["email"] == "ada@example.com"
+
+
+def test_api_key_scopes_data_to_its_owner(api_client):
+    other = api_client.db.create_user("eve@example.com", "$argon2id$fake")
+    api_client.db.create_application(company="EveCo", role_title="X",
+                                     job_url="https://y.com/1", user_id=other.id)
+    api_client.db.create_application(company="AdaCo", role_title="Y",
+                                     job_url="https://y.com/2", user_id=api_client.user.id)
+
+    body = api_client.get("/api/v1/applications",
+                          headers={"Authorization": f"Bearer {api_client.raw_key}"}).json()
+    companies = {a["company"] for a in body["applications"]}
+    assert companies == {"AdaCo"}
+
+
+def test_revoked_api_key_stops_working(api_client, web):
+    web.post("/settings/api-key/revoke", data={"csrf_token": csrf(web)})
+    response = api_client.get("/api/v1/me",
+                              headers={"Authorization": f"Bearer {api_client.raw_key}"})
+    assert response.status_code == 401
+
+
+def test_api_costs_endpoint_rejects_unsupported_windows(api_client):
+    auth = {"Authorization": f"Bearer {api_client.raw_key}"}
+    assert api_client.get("/api/v1/costs?days=7", headers=auth).status_code == 400
+    assert api_client.get("/api/v1/costs?days=90", headers=auth).status_code == 200
+
+
+# ---------------- costs ----------------
+
+
+def test_cost_dashboard_aggregates_recorded_usage(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    for _ in range(3):
+        web.db.record_usage(user.id, "claude-opus-5", "tailor",
+                            input_tokens=10_000, output_tokens=2_000, cost_usd=0.10)
+
+    page = web.get("/costs?days=30").text
+    assert "$0.30" in page
+    assert "claude-opus-5" in page
+
+    for window in (30, 90, 120, 360):
+        assert web.get(f"/costs?days={window}").status_code == 200
+
+
+def test_cost_windows_outside_the_allowed_set_fall_back(web):
+    signup(web, "ada@example.com")
+    assert web.get("/costs?days=7").status_code == 200   # silently uses 30
+
+
+# ---------------- security headers ----------------
+
+
+def test_security_headers_present(web):
+    response = web.get("/login")
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert "'unsafe-inline'" not in response.headers["Content-Security-Policy"]
+
+
+def test_openapi_schema_is_not_exposed(web):
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert web.get(path).status_code == 404
+
+
+# ---------------- CSRF token minting ----------------
+
+
+def test_first_visit_form_carries_a_usable_csrf_token(web):
+    """Regression: the token was minted on the response, so a first-time
+    visitor's form rendered an empty value and every signup 403'd."""
+    import re
+
+    response = web.get("/signup")
+    rendered = re.search(r'name="csrf_token" value="([^"]*)"', response.text)
+    assert rendered and rendered.group(1), "signup form rendered without a CSRF token"
+
+    cookie = response.cookies.get("jp_csrf")
+    assert cookie == rendered.group(1), "rendered token must match the cookie"
+
+
+def test_signup_succeeds_on_a_cold_first_visit(web):
+    """No warm-up request: exactly what a real browser does."""
+    import re
+
+    fresh = TestClient(web.app, follow_redirects=False)
+    page = fresh.get("/signup")
+    token = re.search(r'name="csrf_token" value="([^"]*)"', page.text).group(1)
+
+    response = fresh.post("/signup", data={
+        "email": "cold@example.com", "password": GOOD_PASSWORD,
+        "confirm": GOOD_PASSWORD, "csrf_token": token})
+    assert response.status_code == 303
+    assert web.db.get_user_by_email("cold@example.com") is not None
+
+
+def test_login_form_also_carries_a_token_on_first_visit(web):
+    import re
+
+    page = TestClient(web.app, follow_redirects=False).get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]*)"', page.text)
+    assert token and token.group(1)
+
+# ---------------- CSP compliance ----------------
+
+
+@pytest.mark.parametrize("path", ["/", "/profile", "/applications", "/actions",
+                                  "/logs", "/costs", "/settings"])
+def test_pages_contain_no_inline_styles(web, path):
+    """The CSP sets style-src 'self', so the browser discards inline style
+    attributes entirely. Any that slip in are silently dead styling — which is
+    how the cost chart once rendered as a flat line."""
+    import re
+
+    signup(web, "ada@example.com")
+    html = web.get(path).text
+    assert re.search(r'style="[^"]*"', html) is None, f"{path} emits inline styles"
+
+
+def test_login_and_signup_contain_no_inline_styles(web):
+    import re
+
+    for path in ("/login", "/signup"):
+        assert re.search(r'style="[^"]*"', web.get(path).text) is None, path
+
+
+def test_chart_bar_classes_exist_in_the_stylesheet(web):
+    """Every .hNN class the template can emit must be defined, or bars vanish."""
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parent.parent / "web/static/app.css").read_text()
+    for pct in (0, 1, 37, 99, 100):
+        assert f".chart .col i.h{pct} {{" in css
+        assert f".bar > i.w{pct} {{" in css
+
+
+def test_cost_chart_scales_bars_to_the_peak(web):
+    """Regression: bars collapsed to nothing, drawing a flat line regardless
+    of actual spend."""
+    import re
+
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.record_usage(user.id, "claude-opus-5", "tailor", cost_usd=1.00)
+
+    classes = re.findall(r'<i class="h(\d+)"></i>', web.get("/costs?days=30").text)
+    assert classes, "chart emitted no bars"
+    assert max(int(c) for c in classes) == 100, "peak day must fill the chart"

@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}{{ app.company }} · {{ app.role_title }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ app.role_title }}</h1>
+    <p class="sub">{{ app.company }} ·
+      <a href="{{ app.job_url }}" target="_blank" rel="noopener noreferrer">{{ app.job_url }}</a></p>
+  </div>
+  <div class="actions-row">
+    {% if resume_exists %}
+    <a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}/resume">Download resume</a>
+    {% endif %}
+    <form method="post" action="/applications/{{ app.id }}/apply">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn-sm" type="submit">Run application</button>
+    </form>
+  </div>
+</div>
+
+<div class="grid grid-4 mb-6">
+  <div class="stat"><div class="value">{{ app.match_score|round(1) }}%</div><div class="label">ATS match</div></div>
+  <div class="stat"><div class="value fs-lg">{{ app.status.value }}</div><div class="label">Status</div></div>
+  <div class="stat"><div class="value fs-lg">{{ app.portal_domain or '—' }}</div><div class="label">Portal</div></div>
+  <div class="stat"><div class="value fs-lg">{{ app.created_at.strftime('%b %d') }}</div>
+    <div class="label">Created</div>
+    <div class="note">{{ app.submitted_at.strftime('%b %d') if app.submitted_at else 'not submitted' }}</div></div>
+</div>
+
+{% if actions %}
+<div class="card card-warn">
+  <h2>Items on this application</h2>
+  {% for item in actions %}
+  <div class="list-row-lg">
+    <span class="pill {{ 'pill-bad' if item.kind.value == 'Human verification' else ('pill-mute' if item.status.value != 'Open' else 'pill-warn') }}">{{ item.kind.value }}</span>
+    <span class="pill pill-mute">{{ item.status.value }}</span>
+    <div class="mt-1 fs-sm">{{ item.question }}</div>
+    {% if item.answer %}<div class="hint">Your answer: {{ item.answer }}</div>{% endif %}
+  </div>
+  {% endfor %}
+  <p class="mt-4"><a href="/actions">Go to the queue →</a></p>
+</div>
+{% endif %}
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Record an outcome</h2>
+    <p class="sub mb-4">Interviews and offers become few-shot
+      examples the next time you tailor for a similar role. Rejections are excluded.</p>
+    <form method="post" action="/applications/{{ app.id }}/feedback">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label for="status">Status</label>
+        <select id="status" name="status">
+          {% for status in statuses %}
+          <option value="{{ status.value }}" {{ 'selected' if status == app.status }}>{{ status.value }}</option>
+          {% endfor %}
+        </select></div>
+      <div class="field"><label for="notes">Notes</label>
+        <textarea id="notes" name="notes"
+          placeholder="What happened? Which questions came up? What did the recruiter react to?"></textarea>
+        <p class="hint">Specific notes make the next tailoring pass better.</p></div>
+      <button type="submit">Save outcome</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Portal account</h2>
+    {% if credential %}
+    <p class="sub">Credentials created for <strong>{{ credential.portal_domain }}</strong>.</p>
+    <div class="field"><label>Username</label><div class="secret">{{ credential.username_email }}</div></div>
+    <div class="field"><label>Password</label>
+      <div class="secret">stored encrypted · <a href="/settings">reveal in Settings</a></div></div>
+    <p class="hint">Created {{ credential.created_at.strftime('%b %d, %Y') }}</p>
+    {% else %}
+    <p class="empty">No account stored for this portal — it either needed no login,
+      or one has not been created yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if tailored %}
+<div class="card">
+  <h2>What was submitted</h2>
+  <h3>Summary</h3>
+  <p class="fs-sm">{{ tailored.summary }}</p>
+
+  <h3 class="mt-5">Highlighted skills</h3>
+  <div>{% for skill in tailored.highlighted_skills %}<span class="tag">{{ skill }}</span>{% endfor %}</div>
+
+  <h3 class="mt-5">Experience as tailored</h3>
+  {% for job in tailored.tailored_experience %}
+  <div class="mb-4">
+    <strong class="fs-sm">{{ job.title }}, {{ job.company }}</strong>
+    <span class="hint">{{ job.start_date }} – {{ job.end_date }}</span>
+    <ul class="bullets">
+      {% for bullet in job.bullets %}<li>{{ bullet }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+
+  {% if tailored.screener_answers %}
+  <h3 class="mt-5">Screener answers</h3>
+  <div class="table-wrap"><table>
+    {% for question, answer in tailored.screener_answers.items() %}
+    <tr><td class="w-id">{{ question }}</td><td><strong>{{ answer }}</strong></td></tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+
+  <div class="grid grid-2 mt-5">
+    <div><h3>Keywords covered</h3>
+      <div>{% for kw in tailored.keywords_covered %}<span class="tag tag-hit">{{ kw }}</span>{% endfor %}</div></div>
+    <div><h3>Genuine gaps</h3>
+      {% if tailored.keywords_missing %}
+      <div>{% for kw in tailored.keywords_missing %}<span class="tag tag-miss">{{ kw }}</span>{% endfor %}</div>
+      <p class="hint">These were reported, not invented. Add real experience to your profile to close them.</p>
+      {% else %}<p class="hint">None.</p>{% endif %}</div>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid grid-2">
+  <div class="card"><h2>Job description</h2>
+    <div class="jd">{{ app.job_description or 'Not captured.' }}</div></div>
+  <div class="card"><h2>Run log</h2>
+    {% if logs %}
+    <div class="table-wrap scroll-box"><table class="log">
+      {% for entry in logs %}
+      <tr><td class="w-time-sm">{{ entry.created_at.strftime('%m/%d %H:%M') }}</td>
+        <td class="lvl-{{ entry.level.value }}">{{ entry.event }}</td>
+        <td>{{ entry.message[:140] }}</td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}<p class="empty">No log entries.</p>{% endif %}</div>
+</div>
+
+{% if app.notes %}
+<div class="card"><h2>Notes</h2><div class="jd">{{ app.notes }}</div></div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,19 @@
+# Secrets and personal data — never commit these
+.env
+data/*.key
+data/*.db
+data/browser_profile/
+config/master_profile.json
+
+# Generated artefacts
+output/
+*.pdf
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store

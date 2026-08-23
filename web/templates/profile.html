@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}Profile{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Your profile</h1>
+    <p class="sub">The canonical source of truth. Everything on a tailored resume must
+      trace back to something here — nothing is invented.</p></div>
+</div>
+
+{% if welcome %}
+<div class="flash flash-ok">Account created. Fill this in once and every application reuses it.</div>
+{% endif %}
+
+<div class="card">
+  <div class="actions-row between">
+    <strong>{{ readiness.percent }}% complete ({{ readiness.done }}/{{ readiness.total }})</strong>
+    {% if readiness.ready %}<span class="pill pill-good">Ready to apply</span>{% endif %}
+  </div>
+  <div class="bar mt-2"><i class="w{{ readiness.percent }}"></i></div>
+  {% if readiness.missing %}
+  <p class="hint mt-2">Still needed: {{ readiness.missing|join(', ') }}</p>
+  {% endif %}
+</div>
+
+<form method="post" action="/profile">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+<div class="card">
+  <h2>Contact</h2>
+  <div class="field-row">
+    <div class="field"><label for="full_name">Full legal name</label>
+      <input id="full_name" type="text" name="full_name" value="{{ profile.contact.full_name }}" required></div>
+    <div class="field"><label for="preferred_name">Preferred name</label>
+      <input id="preferred_name" type="text" name="preferred_name" value="{{ profile.contact.preferred_name }}"></div>
+    <div class="field"><label for="email">Email</label>
+      <input id="email" type="email" name="email" value="{{ profile.contact.email }}" required></div>
+    <div class="field"><label for="phone">Phone</label>
+      <input id="phone" type="text" name="phone" value="{{ profile.contact.phone }}"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label for="city">City</label>
+      <input id="city" type="text" name="city" value="{{ profile.contact.location.city }}"></div>
+    <div class="field"><label for="state">State / province</label>
+      <input id="state" type="text" name="state" value="{{ profile.contact.location.state }}"></div>
+    <div class="field"><label for="country">Country</label>
+      <input id="country" type="text" name="country" value="{{ profile.contact.location.country }}"></div>
+    <div class="field"><label for="postal_code">Postal code</label>
+      <input id="postal_code" type="text" name="postal_code" value="{{ profile.contact.location.postal_code }}"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label for="remote_preference">Remote preference</label>
+      <select id="remote_preference" name="remote_preference">
+        {% for option in ['remote', 'hybrid', 'onsite', 'no preference'] %}
+        <option value="{{ option }}" {{ 'selected' if profile.contact.location.remote_preference == option }}>{{ option }}</option>
+        {% endfor %}
+      </select></div>
+    <div class="field"><label>Relocation</label>
+      <label class="check"><input type="checkbox" name="willing_to_relocate"
+        {{ 'checked' if profile.contact.location.willing_to_relocate }}> Willing to relocate</label></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label for="linkedin">LinkedIn</label>
+      <input id="linkedin" type="text" name="linkedin" value="{{ profile.contact.links.linkedin }}"></div>
+    <div class="field"><label for="github">GitHub</label>
+      <input id="github" type="text" name="github" value="{{ profile.contact.links.github }}"></div>
+    <div class="field"><label for="portfolio">Portfolio</label>
+      <input id="portfolio" type="text" name="portfolio" value="{{ profile.contact.links.portfolio }}"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Summary and targets</h2>
+  <div class="field"><label for="summary">Professional summary</label>
+    <textarea id="summary" name="summary" required>{{ profile.summary }}</textarea>
+    <p class="hint">Two or three factual sentences. Emphasis gets rewritten per posting; facts do not.</p></div>
+  <div class="field"><label for="target_titles">Target job titles (one per line)</label>
+    <textarea id="target_titles" name="target_titles">{{ profile.target_titles|join('\n') }}</textarea></div>
+</div>
+
+<div class="card">
+  <h2>Skills</h2>
+  <p class="sub">One per line. Only skills listed here can appear on a resume.</p>
+  <div class="field-row mt-4">
+    <div class="field"><label for="skills_hard">Core / technical</label>
+      <textarea id="skills_hard" name="skills_hard">{{ profile.skills.hard|join('\n') }}</textarea></div>
+    <div class="field"><label for="skills_tooling">Tools and platforms</label>
+      <textarea id="skills_tooling" name="skills_tooling">{{ profile.skills.tooling|join('\n') }}</textarea></div>
+    <div class="field"><label for="skills_soft">Professional</label>
+      <textarea id="skills_soft" name="skills_soft">{{ profile.skills.soft|join('\n') }}</textarea></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="repeat-head"><h2>Experience</h2>
+    <button class="btn-ghost btn-sm" type="button" data-repeat-add="exp">Add role</button></div>
+  <div data-repeat-container="exp">
+    {% for job in profile.experience %}
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>Role {{ loop.index }}</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Company</label>
+          <input type="text" name="exp_{{ loop.index0 }}_company" value="{{ job.company }}"></div>
+        <div class="field"><label>Title</label>
+          <input type="text" name="exp_{{ loop.index0 }}_title" value="{{ job.title }}"></div>
+        <div class="field"><label>Location</label>
+          <input type="text" name="exp_{{ loop.index0 }}_location" value="{{ job.location }}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Start (YYYY-MM)</label>
+          <input type="text" name="exp_{{ loop.index0 }}_start_date" value="{{ job.start_date }}" placeholder="2022-06"></div>
+        <div class="field"><label>End (YYYY-MM)</label>
+          <input type="text" name="exp_{{ loop.index0 }}_end_date" value="{{ job.end_date or '' }}" placeholder="2024-03"></div>
+        <div class="field"><label>Current</label>
+          <label class="check"><input type="checkbox" name="exp_{{ loop.index0 }}_is_current"
+            {{ 'checked' if job.is_current }}> Still working here</label></div>
+      </div>
+      <div class="field"><label>Accomplishments (one per line)</label>
+        <textarea name="exp_{{ loop.index0 }}_bullets">{{ job.bullets|join('\n') }}</textarea>
+        <p class="hint">Real metrics matter. "Cut p99 latency 840ms → 210ms across 14 services" beats "improved performance".</p></div>
+      <div class="field"><label>Technologies used (comma separated)</label>
+        <input type="text" name="exp_{{ loop.index0 }}_tech" value="{{ job.tech_used|join(', ') }}"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <template data-repeat-template="exp">
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>New role</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Company</label><input type="text" name="exp___INDEX___company"></div>
+        <div class="field"><label>Title</label><input type="text" name="exp___INDEX___title"></div>
+        <div class="field"><label>Location</label><input type="text" name="exp___INDEX___location"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Start (YYYY-MM)</label><input type="text" name="exp___INDEX___start_date" placeholder="2022-06"></div>
+        <div class="field"><label>End (YYYY-MM)</label><input type="text" name="exp___INDEX___end_date" placeholder="2024-03"></div>
+        <div class="field"><label>Current</label>
+          <label class="check"><input type="checkbox" name="exp___INDEX___is_current"> Still working here</label></div>
+      </div>
+      <div class="field"><label>Accomplishments (one per line)</label><textarea name="exp___INDEX___bullets"></textarea></div>
+      <div class="field"><label>Technologies used (comma separated)</label><input type="text" name="exp___INDEX___tech"></div>
+    </div>
+  </template>
+</div>
+
+<div class="card">
+  <div class="repeat-head"><h2>Education</h2>
+    <button class="btn-ghost btn-sm" type="button" data-repeat-add="edu">Add education</button></div>
+  <div data-repeat-container="edu">
+    {% for edu in profile.education %}
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>Education {{ loop.index }}</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Institution</label>
+          <input type="text" name="edu_{{ loop.index0 }}_institution" value="{{ edu.institution }}"></div>
+        <div class="field"><label>Degree</label>
+          <input type="text" name="edu_{{ loop.index0 }}_degree" value="{{ edu.degree }}"></div>
+        <div class="field"><label>Field of study</label>
+          <input type="text" name="edu_{{ loop.index0 }}_field_of_study" value="{{ edu.field_of_study }}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Location</label>
+          <input type="text" name="edu_{{ loop.index0 }}_location" value="{{ edu.location }}"></div>
+        <div class="field"><label>End (YYYY-MM)</label>
+          <input type="text" name="edu_{{ loop.index0 }}_end_date" value="{{ edu.end_date }}"></div>
+        <div class="field"><label>GPA (optional)</label>
+          <input type="text" name="edu_{{ loop.index0 }}_gpa" value="{{ edu.gpa or '' }}"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <template data-repeat-template="edu">
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>New education</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Institution</label><input type="text" name="edu___INDEX___institution"></div>
+        <div class="field"><label>Degree</label><input type="text" name="edu___INDEX___degree"></div>
+        <div class="field"><label>Field of study</label><input type="text" name="edu___INDEX___field_of_study"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Location</label><input type="text" name="edu___INDEX___location"></div>
+        <div class="field"><label>End (YYYY-MM)</label><input type="text" name="edu___INDEX___end_date"></div>
+        <div class="field"><label>GPA (optional)</label><input type="text" name="edu___INDEX___gpa"></div>
+      </div>
+    </div>
+  </template>
+</div>
+
+<div class="card">
+  <div class="repeat-head"><h2>Certifications</h2>
+    <button class="btn-ghost btn-sm" type="button" data-repeat-add="cert">Add certification</button></div>
+  <div data-repeat-container="cert">
+    {% for cert in profile.certifications %}
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>Certification {{ loop.index }}</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Name</label>
+          <input type="text" name="cert_{{ loop.index0 }}_name" value="{{ cert.name }}"></div>
+        <div class="field"><label>Issuer</label>
+          <input type="text" name="cert_{{ loop.index0 }}_issuer" value="{{ cert.issuer }}"></div>
+        <div class="field"><label>Issued (YYYY-MM)</label>
+          <input type="text" name="cert_{{ loop.index0 }}_issue_date" value="{{ cert.issue_date }}"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <template data-repeat-template="cert">
+    <div class="repeat-block" data-repeat-item>
+      <div class="repeat-head"><h3>New certification</h3>
+        <button class="btn-danger btn-sm" type="button" data-repeat-remove>Remove</button></div>
+      <div class="field-row">
+        <div class="field"><label>Name</label><input type="text" name="cert___INDEX___name"></div>
+        <div class="field"><label>Issuer</label><input type="text" name="cert___INDEX___issuer"></div>
+        <div class="field"><label>Issued (YYYY-MM)</label><input type="text" name="cert___INDEX___issue_date"></div>
+      </div>
+    </div>
+  </template>
+</div>
+
+<div class="card">
+  <h2>Legal answers</h2>
+  <p class="sub">Copied verbatim into screener forms. These are never generated by the
+    model — answer them truthfully.</p>
+  <div class="field-row mt-4">
+    {% for key, label, options in legal_fields %}
+    <div class="field"><label for="legal_{{ key }}">{{ label }}</label>
+      {% if options %}
+      <select id="legal_{{ key }}" name="legal_{{ key }}">
+        <option value="">—</option>
+        {% for option in options %}
+        <option value="{{ option }}" {{ 'selected' if profile.legal.get(key) == option }}>{{ option }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <input id="legal_{{ key }}" type="text" name="legal_{{ key }}" value="{{ profile.legal.get(key, '') }}">
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Voluntary disclosures</h2>
+  <p class="sub">"Decline to self-identify" is always a valid, penalty-free answer and is
+    the default here.</p>
+  <div class="field-row mt-4">
+    {% for key, label in disclosure_fields %}
+    <div class="field"><label for="vd_{{ key }}">{{ label }}</label>
+      <input id="vd_{{ key }}" type="text" name="vd_{{ key }}"
+             value="{{ profile.voluntary_disclosures.get(key, 'Decline to self-identify') }}"></div>
+    {% endfor %}
+  </div>
+  <div class="field"><label for="how_did_you_hear_about_us">How did you hear about us?</label>
+    <input id="how_did_you_hear_about_us" type="text" name="how_did_you_hear_about_us"
+           value="{{ profile.preferences.get('how_did_you_hear_about_us', 'Company careers page') }}"></div>
+</div>
+
+<div class="actions-row mb-8">
+  <button type="submit">Save profile</button>
+  <a class="btn btn-ghost" href="/">Cancel</a>
+</div>
+</form>
+{% endblock %}
