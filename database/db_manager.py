@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Iterator, Sequence
 from urllib.parse import urlparse
 
+import logging
+
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
@@ -45,6 +47,9 @@ from database.models import (
     RunLog,
     User,
 )
+
+log = logging.getLogger(__name__)
+
 
 # --------------------------------------------------------------------------
 # Key management
@@ -122,6 +127,14 @@ class DBManager:
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
         self._fernet = Fernet(key or load_or_create_key())
         Base.metadata.create_all(self.engine)
+        # create_all does not alter existing tables, so a database written by an
+        # earlier version is missing every column added since. Close that gap
+        # before anything queries it.
+        from database.migrate import add_missing_columns
+
+        added = add_missing_columns(self.engine, Base.metadata)
+        if added:
+            log.info("Schema updated: added %s", ", ".join(added))
 
     @contextmanager
     def session(self) -> Iterator[Session]:
