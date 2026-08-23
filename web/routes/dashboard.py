@@ -19,7 +19,7 @@ from database.models import (
     LogLevel,
 )
 from engine.cost_tracker import COST_WINDOWS, PRICING_AS_OF, daily_series, summarize
-from web.deps import CSRFProtected, CurrentUser, Database, get_worker
+from web.deps import AdminUser, CSRFProtected, CurrentUser, Database, get_worker
 from web.profile_form import (
     DISCLOSURE_FIELDS,
     LEGAL_FIELDS,
@@ -55,6 +55,24 @@ def _redirect(path: str, ok: str = "", error: str = "") -> RedirectResponse:
     if error:
         path += ("&" if "?" in path else "?") + f"error={quote_plus(error)}"
     return RedirectResponse(path, status_code=303)
+
+
+# --------------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------------
+
+
+@router.get("/healthz", include_in_schema=False)
+def healthz(db: Database):
+    """Liveness probe for the platform. Unauthenticated by necessity, so it
+    reveals nothing beyond whether the process can reach its database."""
+    from fastapi.responses import JSONResponse
+
+    try:
+        db.count_users()
+    except Exception:
+        return JSONResponse({"status": "degraded"}, status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 # --------------------------------------------------------------------------
@@ -421,6 +439,43 @@ def costs_page(request: Request, user: CurrentUser, db: Database, days: int = 30
         per_application=db.cost_per_application(user.id, days),
         pricing_as_of=PRICING_AS_OF.isoformat(),
     )
+
+
+# --------------------------------------------------------------------------
+# Admin
+# --------------------------------------------------------------------------
+
+
+@router.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request, user: AdminUser, db: Database,
+               ok: str = "", error: str = ""):
+    users = db.user_overview()
+    return render(
+        request, "admin.html", user, db,
+        users=users,
+        totals={
+            "users": len(users),
+            "applications": sum(u["applications"] for u in users),
+            "spend": round(sum(u["llm_spend"] for u in users), 4),
+            "with_keys": sum(1 for u in users if u["has_anthropic_key"]),
+        },
+        invite_required=bool(settings.INVITE_CODE),
+        ok=ok, error=error,
+    )
+
+
+@router.post("/admin/users/{target_id}/active")
+def set_user_active(request: Request, user: AdminUser, db: Database, target_id: int,
+                    active: str = Form("false"), _csrf: None = CSRFProtected):
+    if target_id == user.id:
+        return _redirect("/admin", error="You cannot suspend your own account.")
+    enable = str(active).lower() in ("true", "on", "1")
+    db.set_user_active(target_id, enable)
+    db.log_event(user.id, "admin_user_active",
+                 f"{'Restored' if enable else 'Suspended'} user #{target_id}",
+                 level=LogLevel.WARNING)
+    return _redirect("/admin", ok=f"User #{target_id} "
+                                  f"{'restored' if enable else 'suspended'}.")
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Accounts</h1>
+    <p class="sub">Everyone registered on this instance.
+      {% if invite_required %}Signup requires an invite code.{% else %}
+      <span class="pill pill-warn">signup is open to anyone</span>{% endif %}</p></div>
+</div>
+
+<div class="grid grid-4 mb-6">
+  <div class="stat"><div class="value">{{ totals.users }}</div><div class="label">Accounts</div>
+    <div class="note">{{ totals.with_keys }} with an API key</div></div>
+  <div class="stat"><div class="value">{{ totals.applications }}</div>
+    <div class="label">Applications</div></div>
+  <div class="stat"><div class="value">{{ totals.spend|money }}</div>
+    <div class="label">LLM spend</div><div class="note">all users, 360d</div></div>
+  <div class="stat"><div class="value">{{ users|selectattr('locked')|list|length }}</div>
+    <div class="label">Locked out</div></div>
+</div>
+
+<div class="card">
+  <h2>Users</h2>
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>Email</th><th>Joined</th><th>Last login</th><th>Profile</th>
+        <th>Apps</th><th>Spend</th><th>Keys</th><th>State</th><th></th></tr>
+    {% for row in users %}
+    <tr>
+      <td class="mono">{{ row.id }}</td>
+      <td>{{ row.email }}
+        {% if row.is_admin %}<span class="pill pill-good">admin</span>{% endif %}</td>
+      <td class="muted">{{ row.created_at.strftime('%b %d, %Y') }}</td>
+      <td class="muted">{{ row.last_login_at.strftime('%b %d %H:%M') if row.last_login_at else 'never' }}</td>
+      <td>{{ row.profile_percent }}%</td>
+      <td>{{ row.applications }}</td>
+      <td>{{ row.llm_spend|money }}<div class="hint">{{ row.llm_calls }} calls</div></td>
+      <td>
+        {% if row.has_anthropic_key %}<span class="pill pill-mute">LLM</span>{% endif %}
+        {% if row.has_api_key %}<span class="pill pill-mute">API</span>{% endif %}
+      </td>
+      <td>
+        {% if not row.is_active %}<span class="pill pill-bad">suspended</span>
+        {% elif row.locked %}<span class="pill pill-warn">locked</span>
+        {% else %}<span class="pill pill-good">active</span>{% endif %}
+        {% if row.failed_logins %}<div class="hint">{{ row.failed_logins }} failed</div>{% endif %}
+      </td>
+      <td>
+        {% if row.id != user.id %}
+        <form method="post" action="/admin/users/{{ row.id }}/active">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="active" value="{{ 'false' if row.is_active else 'true' }}">
+          <button class="btn-ghost btn-sm" type="submit">
+            {{ 'Suspend' if row.is_active else 'Restore' }}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+
+  <p class="hint mt-4">Anthropic keys, portal passwords and profile contents are
+    encrypted per user and are deliberately not shown here — only whether a key
+    is set. Suspending an account signs it out everywhere immediately.</p>
+</div>
+{% endblock %}

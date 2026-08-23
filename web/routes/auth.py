@@ -22,6 +22,7 @@ from web.security import (
     SESSION_COOKIE,
     SESSION_MAX_AGE,
     hash_password,
+    invite_code_valid,
     is_locked,
     lockout_until,
     needs_rehash,
@@ -120,7 +121,7 @@ def signup_form(request: Request):
     if not settings.ALLOW_SIGNUP:
         return _render(request, "login.html", next="/", allow_signup=False,
                        error="Signup is disabled on this instance.")
-    return _render(request, "signup.html")
+    return _render(request, "signup.html", invite_required=bool(settings.INVITE_CODE))
 
 
 @router.post("/signup")
@@ -130,29 +131,48 @@ def signup(
     email: str = Form(...),
     password: str = Form(...),
     confirm: str = Form(...),
+    invite_code: str = Form(""),
     _csrf: None = CSRFProtected,
 ):
+    invite_required = bool(settings.INVITE_CODE)
     if not settings.ALLOW_SIGNUP:
-        return _render(request, "signup.html", error="Signup is disabled on this instance.")
+        return _render(request, "signup.html", invite_required=invite_required,
+                       error="Signup is disabled on this instance.")
 
     enforce_rate_limit(request, "signup", client_ip(request))
     email = email.strip().lower()
 
+    # Checked before anything else, so a wrong code reveals nothing about
+    # whether the address is already registered.
+    if not invite_code_valid(invite_code, settings.INVITE_CODE):
+        db.log_event(None, "invite_rejected",
+                     f"Bad invite code from {client_ip(request)}", level=LogLevel.WARNING)
+        return _render(request, "signup.html", email=email, invite_required=invite_required,
+                       error="That invite code is not valid.")
+
     if not valid_email(email):
-        return _render(request, "signup.html", email=email, error="Enter a valid email address.")
+        return _render(request, "signup.html", email=email, invite_required=invite_required,
+                       error="Enter a valid email address.")
     if password != confirm:
-        return _render(request, "signup.html", email=email, error="Passwords do not match.")
+        return _render(request, "signup.html", email=email, invite_required=invite_required,
+                       error="Passwords do not match.")
 
     problems = password_problems(password, email)
     if problems:
-        return _render(request, "signup.html", email=email, error=" ".join(problems))
+        return _render(request, "signup.html", email=email, invite_required=invite_required,
+                       error=" ".join(problems))
 
     try:
         user = db.create_user(email, hash_password(password))
     except ValueError:
         # Do not confirm whether an address is already registered.
-        return _render(request, "signup.html", email=email,
+        return _render(request, "signup.html", email=email, invite_required=invite_required,
                        error="Could not create that account. Try logging in instead.")
+
+    # The nominated admin, or the very first account, gets the admin view.
+    if settings.ADMIN_EMAIL == email or db.count_users() == 1:
+        db.update_user(user.id, is_admin=True)
+        user = db.get_user(user.id)
 
     db.log_event(user.id, "signup", f"Account created from {client_ip(request)}")
     response = RedirectResponse("/profile?welcome=1", status_code=303)

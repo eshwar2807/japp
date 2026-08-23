@@ -8,6 +8,11 @@
   {% if error %}<div class="flash flash-err mt-5">{{ error }}</div>{% endif %}
   <form method="post" action="/signup" class="mt-5">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if invite_required %}
+    <div class="field"><label for="invite_code">Invite code</label>
+      <input id="invite_code" type="text" name="invite_code" required autocomplete="off">
+      <p class="hint">This instance is invite-only.</p></div>
+    {% endif %}
     <div class="field"><label for="email">Email</label>
       <input id="email" type="email" name="email" value="{{ email or '' }}" required
              autocomplete="username" autofocus></div>

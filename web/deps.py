@@ -50,7 +50,7 @@ def get_worker():
     """The batch queue worker. One per process; started during app lifespan."""
     from web.queue_worker import QueueWorker
 
-    return QueueWorker(get_db())
+    return QueueWorker(get_db(), kinds=settings.WORKER_KINDS)
 
 
 def client_ip(request: Request) -> str:
@@ -103,7 +103,20 @@ def require_user(request: Request) -> User:
     return user
 
 
+def require_admin(request: Request) -> User:
+    """Admin-only pages. Non-admins get a 404, not a 403.
+
+    A 403 confirms the page exists; a 404 says nothing about whether this
+    instance has an admin surface at all.
+    """
+    user = require_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+    return user
+
+
 CurrentUser = Annotated[User, Depends(require_user)]
+AdminUser = Annotated[User, Depends(require_admin)]
 OptionalUser = Annotated["User | None", Depends(optional_user)]
 Database = Annotated[DBManager, Depends(get_db)]
 

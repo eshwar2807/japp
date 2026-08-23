@@ -842,21 +842,33 @@ class DBManager:
                 stmt = stmt.where(RunJob.batch_id == batch_id)
             return sess.scalars(stmt).all()
 
-    def claim_next_job(self) -> RunJob | None:
+    def claim_next_job(
+        self, kinds: tuple[str, ...] | None = None, user_id: int | None = None
+    ) -> RunJob | None:
         """Atomically move the oldest runnable job to RUNNING and return it.
 
         READY (a human answered) is served before QUEUED, so clearing blocks
         drains the backlog rather than competing with fresh work.
+
+        `kinds` matters once the dashboard is hosted: the server can only run
+        jobs that need no visible browser, so it claims `tailor` only and leaves
+        `apply` for the local agent. Without that filter a hosted instance would
+        happily start browser work nobody can see or clear.
         """
         with self.session() as sess:
             for status in (JobStatus.READY, JobStatus.QUEUED):
-                job = sess.scalars(
+                stmt = (
                     select(RunJob)
                     .where(RunJob.status == status)
                     .order_by(RunJob.position.asc(), RunJob.id.asc())
                     .limit(1)
                     .with_for_update(nowait=False)
-                ).first()
+                )
+                if kinds:
+                    stmt = stmt.where(RunJob.kind.in_(kinds))
+                if user_id is not None:
+                    stmt = stmt.where(RunJob.user_id == user_id)
+                job = sess.scalars(stmt).first()
                 if job is None:
                     continue
                 job.status = JobStatus.RUNNING
@@ -1030,3 +1042,69 @@ class DBManager:
                 )
             )
             return int(result.rowcount or 0)
+
+    # ======================================================================
+    # Admin
+    # ======================================================================
+
+    def count_users(self) -> int:
+        with self.session() as sess:
+            return int(sess.scalar(select(func.count(User.id))) or 0)
+
+    def list_users(self, limit: int = 200) -> Sequence[User]:
+        with self.session() as sess:
+            return sess.scalars(
+                select(User).order_by(User.created_at.desc()).limit(limit)
+            ).all()
+
+    def user_overview(self, limit: int = 200) -> list[dict]:
+        """Account activity for the admin view.
+
+        Deliberately excludes anything private: no decrypted keys, no portal
+        passwords, no profile contents. Only whether a key is set, and activity
+        counts. Holding that data is unavoidable; displaying it is not.
+        """
+        from web.profile_form import completeness
+
+        rows: list[dict] = []
+        for user in self.list_users(limit):
+            profile = self.get_profile(user.id)
+            usage = self.usage_rows(user.id, days=360)
+            with self.session() as sess:
+                applications = int(
+                    sess.scalar(
+                        select(func.count(Application.id)).where(
+                            Application.user_id == user.id
+                        )
+                    )
+                    or 0
+                )
+            rows.append({
+                "id": user.id,
+                "email": user.email,
+                "is_admin": user.is_admin,
+                "is_active": user.is_active,
+                "created_at": user.created_at,
+                "last_login_at": user.last_login_at,
+                "failed_logins": user.failed_logins or 0,
+                "locked": user.locked_until is not None,
+                "has_anthropic_key": bool(user.encrypted_anthropic_key),
+                "has_api_key": bool(user.api_key_hash),
+                "profile_percent": completeness(profile)["percent"] if profile else 0,
+                "applications": applications,
+                "llm_calls": len(usage),
+                "llm_spend": round(sum(cost for _, cost, _ in usage), 4),
+                "open_actions": self.count_open_actions(user.id),
+            })
+        return rows
+
+    def set_user_active(self, user_id: int, active: bool) -> User:
+        """Suspend or restore an account, retiring its sessions either way."""
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user is None:
+                raise ValueError(f"No user with id {user_id}.")
+            user.is_active = active
+            user.session_epoch = (user.session_epoch or 1) + 1
+            sess.flush()
+            return user

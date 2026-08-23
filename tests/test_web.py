@@ -79,6 +79,13 @@ def signup(client, email: str, password: str = GOOD_PASSWORD):
     )
 
 
+def _form_token(client, path: str) -> str:
+    """The CSRF token rendered into a form on a cold first visit."""
+    import re
+
+    return re.search(r'name="csrf_token" value="([^"]*)"', client.get(path).text).group(1)
+
+
 def csrf(client) -> str:
     client.get("/")
     return client.cookies.get("jp_csrf") or ""
@@ -617,3 +624,163 @@ def test_api_cannot_read_another_users_job(api_client):
     job = api_client.db.enqueue_job(other.id, job_url="https://x.com/1")
     auth = {"Authorization": f"Bearer {api_client.raw_key}"}
     assert api_client.get(f"/api/v1/queue/{job.id}", headers=auth).status_code == 404
+
+
+# ---------------- invite code ----------------
+
+
+def test_signup_requires_the_invite_code_when_one_is_set(web, monkeypatch):
+    monkeypatch.setattr(settings, "INVITE_CODE", "letmein-1234")
+    fresh = TestClient(web.app, follow_redirects=False)
+    token = _form_token(fresh, "/signup")
+
+    response = fresh.post("/signup", data={
+        "email": "eve@example.com", "password": GOOD_PASSWORD,
+        "confirm": GOOD_PASSWORD, "invite_code": "wrong", "csrf_token": token})
+
+    assert response.status_code == 200
+    assert "invite code is not valid" in response.text
+    assert web.db.get_user_by_email("eve@example.com") is None
+
+
+def test_signup_succeeds_with_the_right_invite_code(web, monkeypatch):
+    monkeypatch.setattr(settings, "INVITE_CODE", "letmein-1234")
+    fresh = TestClient(web.app, follow_redirects=False)
+    token = _form_token(fresh, "/signup")
+
+    response = fresh.post("/signup", data={
+        "email": "eve@example.com", "password": GOOD_PASSWORD,
+        "confirm": GOOD_PASSWORD, "invite_code": "letmein-1234", "csrf_token": token})
+
+    assert response.status_code == 303
+    assert web.db.get_user_by_email("eve@example.com") is not None
+
+
+def test_a_bad_invite_code_does_not_reveal_whether_the_email_exists(web, monkeypatch):
+    """The code is checked first, so the response is identical either way."""
+    monkeypatch.setattr(settings, "INVITE_CODE", "letmein-1234")
+    signup_ok = TestClient(web.app, follow_redirects=False)
+    token = _form_token(signup_ok, "/signup")
+    signup_ok.post("/signup", data={"email": "taken@example.com", "password": GOOD_PASSWORD,
+                                    "confirm": GOOD_PASSWORD, "invite_code": "letmein-1234",
+                                    "csrf_token": token})
+
+    fresh = TestClient(web.app, follow_redirects=False)
+    token = _form_token(fresh, "/signup")
+    existing = fresh.post("/signup", data={"email": "taken@example.com", "password": GOOD_PASSWORD,
+                                           "confirm": GOOD_PASSWORD, "invite_code": "no",
+                                           "csrf_token": token})
+    fresh2 = TestClient(web.app, follow_redirects=False)
+    token2 = _form_token(fresh2, "/signup")
+    unknown = fresh2.post("/signup", data={"email": "new@example.com", "password": GOOD_PASSWORD,
+                                           "confirm": GOOD_PASSWORD, "invite_code": "no",
+                                           "csrf_token": token2})
+    assert existing.status_code == unknown.status_code
+    assert "invite code is not valid" in existing.text
+    assert "invite code is not valid" in unknown.text
+
+
+def test_signup_works_when_no_invite_code_is_configured(web, monkeypatch):
+    monkeypatch.setattr(settings, "INVITE_CODE", None)
+    assert signup(web, "ada@example.com").status_code == 303
+
+
+# ---------------- admin ----------------
+
+
+def test_the_first_account_becomes_admin(web):
+    signup(web, "first@example.com")
+    assert web.db.get_user_by_email("first@example.com").is_admin is True
+
+
+def test_later_accounts_are_not_admin(web):
+    signup(web, "first@example.com")
+    second = TestClient(web.app, follow_redirects=False)
+    signup(second, "second@example.com")
+    assert web.db.get_user_by_email("second@example.com").is_admin is False
+
+
+def test_nominated_admin_email_is_promoted(web, monkeypatch):
+    signup(web, "first@example.com")
+    monkeypatch.setattr(settings, "ADMIN_EMAIL", "boss@example.com")
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "boss@example.com")
+    assert web.db.get_user_by_email("boss@example.com").is_admin is True
+
+
+def test_admin_page_is_invisible_to_normal_users(web):
+    signup(web, "first@example.com")            # admin
+    second = TestClient(web.app, follow_redirects=False)
+    signup(second, "second@example.com")
+
+    assert web.get("/admin").status_code == 200
+    # 404, not 403 — a 403 would confirm the page exists.
+    assert second.get("/admin").status_code == 404
+    assert "/admin" not in second.get("/").text
+
+
+def test_admin_view_never_exposes_other_users_secrets(web):
+    signup(web, "first@example.com")
+    second = TestClient(web.app, follow_redirects=False)
+    signup(second, "second@example.com")
+
+    victim = web.db.get_user_by_email("second@example.com")
+    web.db.set_anthropic_key(victim.id, "sk-ant-api03-VICTIMSECRET0000")
+    web.db.upsert_credential("acme.com", "second@example.com", "PortalPassw0rd!",
+                             user_id=victim.id)
+    web.db.save_profile(victim.id, _ready_profile())
+
+    page = web.get("/admin").text
+    assert "second@example.com" in page              # the account is listed
+    assert "sk-ant-api03-VICTIMSECRET0000" not in page
+    assert "PortalPassw0rd!" not in page
+    assert "Ada Lovelace" not in page                # nor their profile contents
+
+
+def test_admin_can_suspend_and_restore_an_account(web):
+    signup(web, "first@example.com")
+    second = TestClient(web.app, follow_redirects=False)
+    signup(second, "second@example.com")
+    target = web.db.get_user_by_email("second@example.com")
+
+    assert second.get("/").status_code == 200
+    web.post(f"/admin/users/{target.id}/active",
+             data={"active": "false", "csrf_token": csrf(web)})
+
+    assert web.db.get_user_by_email("second@example.com").is_active is False
+    # Suspension retires existing sessions immediately.
+    assert second.get("/").status_code == 303
+
+    web.post(f"/admin/users/{target.id}/active",
+             data={"active": "true", "csrf_token": csrf(web)})
+    assert web.db.get_user_by_email("second@example.com").is_active is True
+
+
+def test_admin_cannot_suspend_themselves(web):
+    signup(web, "first@example.com")
+    me = web.db.get_user_by_email("first@example.com")
+    response = web.post(f"/admin/users/{me.id}/active",
+                        data={"active": "false", "csrf_token": csrf(web)})
+    assert "error=" in response.headers["location"]
+    assert web.db.get_user_by_email("first@example.com").is_active is True
+
+
+def test_normal_user_cannot_suspend_anyone(web):
+    signup(web, "first@example.com")
+    admin = web.db.get_user_by_email("first@example.com")
+    second = TestClient(web.app, follow_redirects=False)
+    signup(second, "second@example.com")
+    second.get("/")
+
+    response = second.post(f"/admin/users/{admin.id}/active",
+                           data={"active": "false", "csrf_token": second.cookies.get("jp_csrf")})
+    assert response.status_code == 404
+    assert web.db.get_user_by_email("first@example.com").is_active is True
+
+
+def test_healthz_is_public_and_leaks_nothing(web):
+    response = web.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    # No account, version or configuration detail in an unauthenticated probe.
+    assert "email" not in response.text and "version" not in response.text

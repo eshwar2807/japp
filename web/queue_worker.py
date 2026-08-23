@@ -266,8 +266,18 @@ class QueueGatekeeper(Gatekeeper):
 class QueueWorker:
     """Dispatcher that drains the job queue, honouring the active-slot cap."""
 
-    def __init__(self, db, slots: int = DEFAULT_SLOTS, notifier: Notifier | None = None) -> None:
+    def __init__(
+        self,
+        db,
+        slots: int = DEFAULT_SLOTS,
+        notifier: Notifier | None = None,
+        kinds: tuple[str, ...] = ("tailor", "apply"),
+    ) -> None:
         self.db = db
+        #: Which job kinds this worker will claim. A hosted instance runs
+        #: ("tailor",) only; `apply` needs a browser a human can watch, so it is
+        #: left for the local agent to claim over the API.
+        self.kinds = kinds
         self.registry = ParkRegistry()
         self.notifier = notifier or Notifier(db)
         self._slots = threading.BoundedSemaphore(slots)
@@ -311,7 +321,7 @@ class QueueWorker:
                 self._release()
                 return
             try:
-                job = self.db.claim_next_job()
+                job = self.db.claim_next_job(kinds=self.kinds)
             except Exception:
                 log.exception("Could not claim a job")
                 self._release()

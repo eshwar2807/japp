@@ -210,6 +210,9 @@ class User(Base):
     profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: Grants the /admin view. The first account created becomes admin, or set
+    #: JP_ADMIN_EMAIL to nominate one.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

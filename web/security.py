@@ -80,6 +80,18 @@ def password_problems(password: str, email: str = "") -> list[str]:
     return problems
 
 
+def invite_code_valid(supplied: str, expected: str | None) -> bool:
+    """Constant-time invite-code check.
+
+    Returns True when no code is configured, so an instance without one keeps
+    working. A plain `==` would leak the code a character at a time to anyone
+    who can time the response.
+    """
+    if not expected:
+        return True
+    return hmac.compare_digest((supplied or "").strip(), expected.strip())
+
+
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 
 

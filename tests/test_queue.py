@@ -439,3 +439,20 @@ def test_a_resume_path_pointing_nowhere_fails_fast(db, user, tmp_path):
 
     with pytest.raises(RuntimeError, match="missing"):
         run_apply_job(db, job.id, user.id, gatekeeper=None)
+
+
+def test_a_worker_only_claims_the_kinds_it_can_run(db, user):
+    """A hosted dashboard must not start browser work nobody can watch."""
+    db.enqueue_job(user.id, kind="apply", job_url="https://x.com/apply")
+    tailor = db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/tailor")
+
+    claimed = db.claim_next_job(kinds=("tailor",))
+    assert claimed.id == tailor.id
+    # The apply job is left alone for the local agent.
+    assert db.claim_next_job(kinds=("tailor",)) is None
+    assert db.claim_next_job(kinds=("apply",)) is not None
+
+
+def test_an_unfiltered_worker_claims_everything(db, user):
+    db.enqueue_job(user.id, kind="apply", job_url="https://x.com/apply")
+    assert db.claim_next_job() is not None

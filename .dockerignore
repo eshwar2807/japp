@@ -1,0 +1,19 @@
+# Never ship secrets or local state into the image
+.env
+data/
+output/
+*.db
+*.key
+
+# Local tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+.gitignore
+.DS_Store
+
+# Not needed at runtime
+tests/
+README.md

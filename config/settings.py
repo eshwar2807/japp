@@ -113,7 +113,17 @@ WEB_PORT = int(os.getenv("JP_WEB_PORT", "8000"))
 COOKIE_SECURE = os.getenv("JP_INSECURE_COOKIES", "false").lower() != "true"
 # Open signup is convenient for a personal install and wrong for a shared one.
 ALLOW_SIGNUP = os.getenv("JP_ALLOW_SIGNUP", "true").lower() == "true"
+# When set, signup additionally requires this code. Keep it in an environment
+# variable or a Fly secret - never in the repository.
+INVITE_CODE = os.getenv("JP_INVITE_CODE") or None
+# Nominates the admin account. Otherwise the first account created is admin.
+ADMIN_EMAIL = (os.getenv("JP_ADMIN_EMAIL") or "").strip().lower() or None
 LOG_RETENTION_DAYS = int(os.getenv("JP_LOG_RETENTION_DAYS", "90"))
+# Job kinds this process will run. A hosted dashboard sets JP_WORKER_KINDS=tailor
+# so browser work is left to a local agent, where a human can see the window.
+WORKER_KINDS = tuple(
+    k.strip() for k in os.getenv("JP_WORKER_KINDS", "tailor,apply").split(",") if k.strip()
+)
 
 
 def load_or_create_secret_key() -> str:
