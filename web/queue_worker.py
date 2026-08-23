@@ -25,11 +25,12 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from automation.gatekeeper import Gatekeeper
-from automation.notifier import Notifier, block_notice
+from automation.notifier import Notice, Notifier, block_notice
 from config import settings
 from database.models import ActionKind, BlockMode, JobStatus, LogLevel
 
@@ -44,6 +45,9 @@ HELD_BROWSER_TIMEOUT = 3600
 #: Dispatcher idle poll. Short, because it also bounds how long a freed slot
 #: sits unused after a job parks — the delay before the next batch item starts.
 POLL_SECONDS = 0.25
+#: How often the daily-spend ceiling is recomputed. Far longer than the poll:
+#: the answer changes at most once per completed job.
+CAP_REFRESH_SECONDS = 15.0
 
 
 class QueueStopped(Exception):
@@ -161,6 +165,9 @@ class QueueGatekeeper(Gatekeeper):
     def _notify(self, reason: str, kind: str) -> None:
         user = self.db.get_user(self.user_id)
         if user is None:
+            return
+        # In digest mode the day stays silent; the summary goes out later.
+        if (user.notify_mode or "immediate") == "digest":
             return
         # One notification per quiet window, so a ten-item batch does not fire
         # ten alerts in a row.
@@ -286,6 +293,10 @@ class QueueWorker:
         self._dispatcher: threading.Thread | None = None
         self._threads: set[threading.Thread] = set()
         self._lock = threading.Lock()
+        #: Users already told they hit the cap, so it is said once per day.
+        self._capped_cache: set[int] = set()
+        self._capped_checked_at = 0.0
+        self._last_digest_check = 0.0
         #: Overridden in tests to avoid launching a real browser.
         self.handlers: dict[str, Callable[..., Any]] = {}
 
@@ -321,16 +332,94 @@ class QueueWorker:
                 self._release()
                 return
             try:
-                job = self.db.claim_next_job(kinds=self.kinds)
+                # Users at their daily ceiling are skipped wholesale. Blocking
+                # each of their queued jobs instead would churn a hundred rows
+                # to say the same thing a hundred times.
+                job = self.db.claim_next_job(
+                    kinds=self.kinds, exclude_users=self._capped_users()
+                )
             except Exception:
                 log.exception("Could not claim a job")
                 self._release()
                 continue
             if job is None:
                 self._release()
+                self._maybe_send_digests()
                 self._stop.wait(POLL_SECONDS)
                 continue
             self._spawn(job)
+
+    def _capped_users(self) -> set[int]:
+        """Users over their daily cap, refreshed on a timer.
+
+        The dispatcher ticks several times a second; recomputing spend on every
+        tick would query the database continuously for an answer that changes
+        at most once per job.
+        """
+        now = time.monotonic()
+        if now - self._capped_checked_at < CAP_REFRESH_SECONDS:
+            return self._capped_cache
+        self._capped_checked_at = now
+
+        try:
+            capped = self.db.users_over_daily_cap()
+        except Exception:
+            log.exception("Spend-cap check failed")
+            return self._capped_cache
+
+        for user_id in capped - self._capped_cache:
+            self._announce_cap(user_id)
+        self._capped_cache = capped
+        return capped
+
+    def _announce_cap(self, user_id: int) -> None:
+        user = self.db.get_user(user_id)
+        if user is None:
+            return
+        cap = self.db.daily_cap_for(user_id)
+        spent = self.db.spend_today(user_id)
+        message = (f"Daily spend cap reached: ${spent:.2f} of ${cap:.2f}. "
+                   "The queue is paused until tomorrow, or raise the cap in Settings.")
+        self.db.log_event(user_id, "spend_cap", message, level=LogLevel.WARNING)
+        try:
+            self.notifier.notify(user, Notice("Job pipeline: spend cap reached",
+                                              message, "/settings"))
+        except Exception:
+            log.exception("Could not send spend-cap notice")
+
+    def _maybe_send_digests(self) -> None:
+        """Send end-of-day summaries. Checked at most once a minute."""
+        now = time.monotonic()
+        if now - self._last_digest_check < 60:
+            return
+        self._last_digest_check = now
+
+        try:
+            due = self.db.users_due_for_digest()
+        except Exception:
+            log.exception("Digest check failed")
+            return
+
+        for user_id, blocked in due:
+            user = self.db.get_user(user_id)
+            if user is None:
+                continue
+            summary = self.db.queue_summary(user_id)
+            spent = self.db.spend_today(user_id)
+            body = (
+                f"{blocked} item(s) need you.\n"
+                f"{summary.get('Done', 0)} done, {summary.get('Failed', 0)} failed, "
+                f"{summary.get('Queued', 0) + summary.get('Ready', 0)} still queued.\n"
+                f"Spend today: ${spent:.2f}"
+            )
+            try:
+                self.notifier.notify(
+                    user, Notice("Job pipeline: your daily summary", body, "/actions")
+                )
+                self.db.mark_digest_sent(user_id)
+                self.db.log_event(user_id, "digest_sent", body)
+            except Exception:
+                log.exception("Could not send digest to user %s", user_id)
 
     def _release(self) -> None:
         try:
@@ -404,6 +493,8 @@ class QueueWorker:
         user = self.db.get_user(user_id)
         if user is None:
             return
+        if (user.notify_mode or "immediate") == "digest":
+            return
         if self.db.recently_notified(user_id, user.notify_quiet_seconds or 0):
             return
         job = self.db.get_job(job_id)
@@ -436,4 +527,8 @@ class QueueWorker:
 def _default_handlers() -> dict[str, Callable[..., Any]]:
     from web import runner
 
-    return {"tailor": runner.run_tailor_job, "apply": runner.run_apply_job}
+    return {
+        "tailor": runner.run_tailor_job,
+        "apply": runner.run_apply_job,
+        "discover": runner.run_discovery_job,
+    }

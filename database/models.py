@@ -225,6 +225,19 @@ class User(Base):
     notify_webhook_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     #: Suppress repeat notifications for the same batch within this many seconds.
     notify_quiet_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    #: "immediate" alerts on every block; "digest" stays silent all day and
+    #: sends one summary, which is what makes a 100-a-day run bearable.
+    notify_mode: Mapped[str] = mapped_column(String(16), default="immediate")
+    notify_digest_hour: Mapped[int] = mapped_column(Integer, default=18)
+    notify_utc_offset_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    last_digest_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    #: Per-user overrides for the tiered models and the daily spend ceiling.
+    model_bulk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_priority: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    daily_spend_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -433,6 +446,8 @@ class RunJob(Base):
     )
     #: Groups jobs enqueued together, so a batch can be tracked as a unit.
     batch_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    #: Priority jobs use the expensive model; bulk discovery jobs the cheap one.
+    priority: Mapped[bool] = mapped_column(Boolean, default=False)
 
     kind: Mapped[str] = mapped_column(String(16), default="tailor")   # tailor | apply
     job_url: Mapped[str] = mapped_column(String(1024), default="")

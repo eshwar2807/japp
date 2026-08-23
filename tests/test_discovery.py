@@ -1,0 +1,477 @@
+"""Discovery, board clients, spend caps and the daily digest.
+
+The property that matters most here: the model supplies companies, the
+employer's own API supplies postings. A hallucinated job cannot survive that,
+because it simply will not appear in the board response.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from config import settings
+from engine.boards import Posting, dedupe, detect_board, matches
+from engine.discovery import (
+    CompanySearchResult,
+    CompanySuggestion,
+    DiscoveryCriteria,
+    DiscoveryEngine,
+)
+
+
+@pytest.fixture()
+def user(db):
+    return db.create_user("ada@example.com", "$argon2id$fake")
+
+
+def posting(**kw):
+    base = dict(company="Acme", title="Senior Backend Engineer",
+                url="https://boards.greenhouse.io/acme/jobs/1",
+                location="Austin, TX", board="greenhouse", external_id="1")
+    return Posting(**{**base, **kw})
+
+
+# ---------------- board detection ----------------
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://boards.greenhouse.io/stripe/jobs/123", ("greenhouse", "stripe")),
+    ("https://job-boards.greenhouse.io/acme", ("greenhouse", "acme")),
+    ("https://jobs.lever.co/spotify/abc-123", ("lever", "spotify")),
+    ("https://jobs.eu.lever.co/acme/x", ("lever", "acme")),
+    ("https://jobs.ashbyhq.com/linear/xyz", ("ashby", "linear")),
+    ("https://acme.wd1.myworkdayjobs.com/careers", None),
+    ("https://acme.com/careers", None),
+    ("", None),
+])
+def test_detect_board(url, expected):
+    assert detect_board(url) == expected
+
+
+# ---------------- filtering ----------------
+
+
+def test_title_filter_keeps_only_matching_roles():
+    assert matches(posting(title="Senior Backend Engineer"), titles=["backend"])
+    assert not matches(posting(title="Account Executive"), titles=["backend"])
+
+
+def test_excluded_terms_win_over_title_match():
+    """An internship matching the title must still be dropped."""
+    assert not matches(posting(title="Backend Engineer Intern"),
+                       titles=["backend"], exclude=["intern"])
+
+
+def test_remote_locations_are_accepted_for_any_city():
+    assert matches(posting(location="Remote - US"), locations=["austin"])
+
+
+def test_no_filters_keeps_everything():
+    assert matches(posting(title="Anything At All"))
+
+
+def test_dedupe_drops_repeats_and_previously_seen():
+    a, b = posting(external_id="1"), posting(external_id="2")
+    assert len(dedupe([a, b, posting(external_id="1")])) == 2
+    assert dedupe([a, b], seen_keys={a.key}) == [b]
+
+
+def test_dedupe_drops_postings_with_no_url():
+    assert dedupe([posting(url="")]) == []
+
+
+# ---------------- discovery ----------------
+
+
+class StubMessages:
+    """Returns a fixed company list without touching the network."""
+
+    def __init__(self, result, stop_reason="end_turn"):
+        self.result = result
+        self.stop_reason = stop_reason
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(parsed_output=self.result, stop_reason=self.stop_reason,
+                               content=[])
+
+
+def test_discovery_asks_for_companies_with_web_search():
+    stub = StubMessages(CompanySearchResult(companies=[
+        CompanySuggestion(name="Stripe", careers_url="https://boards.greenhouse.io/stripe")]))
+    engine = DiscoveryEngine(client=stub)
+
+    engine.find_companies(DiscoveryCriteria(titles=["Backend Engineer"]))
+
+    tools = stub.calls[0]["tools"]
+    assert tools[0]["type"].startswith("web_search_")
+    assert stub.calls[0]["output_format"] is CompanySearchResult
+
+
+def test_discovery_passes_exclusions_into_the_prompt():
+    stub = StubMessages(CompanySearchResult(companies=[]))
+    DiscoveryEngine(client=stub).find_companies(
+        DiscoveryCriteria(titles=["Backend"]), already_applied=["Acme", "Globex"])
+
+    prompt = stub.calls[0]["messages"][0]["content"]
+    assert "Acme" in prompt and "Globex" in prompt
+    assert "do not return these" in prompt.lower()
+
+
+def test_discovery_uses_an_opus_tier_model_not_haiku():
+    """Web search is unavailable on Haiku, so discovery must not use it."""
+    assert "haiku" not in settings.LLM_MODEL_DISCOVERY.lower()
+    assert DiscoveryEngine(client=StubMessages(CompanySearchResult())).model \
+        == settings.LLM_MODEL_DISCOVERY
+
+
+def test_postings_come_from_the_board_not_the_model(monkeypatch):
+    """The model names a company; the employer's API supplies the jobs."""
+    fetched = {}
+
+    def fake_fetch(board, slug):
+        fetched["called"] = (board, slug)
+        return [posting(title="Senior Backend Engineer"),
+                posting(title="Office Manager", external_id="2")]
+
+    monkeypatch.setattr("engine.discovery.fetch_board", fake_fetch)
+    engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
+
+    postings, problems = engine.collect_postings(
+        [CompanySuggestion(name="Acme", careers_url="https://boards.greenhouse.io/acme")],
+        DiscoveryCriteria(titles=["backend"]),
+    )
+    assert fetched["called"] == ("greenhouse", "acme")
+    assert [p.title for p in postings] == ["Senior Backend Engineer"]
+    assert problems == []
+
+
+def test_a_company_with_no_readable_board_is_reported_not_dropped_silently(monkeypatch):
+    engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
+    postings, problems = engine.collect_postings(
+        [CompanySuggestion(name="Mystery Co", careers_url="https://mystery.com/jobs")],
+        DiscoveryCriteria(),
+    )
+    assert postings == []
+    assert "Mystery Co" in problems[0]
+
+
+def test_a_failing_board_does_not_abort_the_whole_run(monkeypatch):
+    from engine.boards import BoardError
+
+    def flaky(board, slug):
+        if slug == "broken":
+            raise BoardError("HTTP 404")
+        return [posting(company=slug)]
+
+    monkeypatch.setattr("engine.discovery.fetch_board", flaky)
+    engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
+    postings, problems = engine.collect_postings([
+        CompanySuggestion(name="Broken", careers_url="https://boards.greenhouse.io/broken"),
+        CompanySuggestion(name="Fine", careers_url="https://boards.greenhouse.io/fine"),
+    ], DiscoveryCriteria())
+
+    assert len(postings) == 1 and len(problems) == 1
+
+
+def test_max_postings_is_enforced(monkeypatch):
+    monkeypatch.setattr("engine.discovery.fetch_board",
+                        lambda b, s: [posting(external_id=str(i)) for i in range(50)])
+    engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
+    postings, _ = engine.collect_postings(
+        [CompanySuggestion(name="Acme", careers_url="https://boards.greenhouse.io/acme")],
+        DiscoveryCriteria(max_postings=10))
+    assert len(postings) == 10
+
+
+# ---------------- spend cap ----------------
+
+
+def test_spend_today_only_counts_today(db, user):
+    db.record_usage(user.id, "claude-haiku-4-5", "tailor", cost_usd=0.50)
+    assert db.spend_today(user.id) == pytest.approx(0.50)
+
+    # Backdate a row: yesterday's spend must not count against today's cap.
+    from database.models import LLMUsage
+
+    with db.session() as sess:
+        sess.add(LLMUsage(user_id=user.id, model="claude-opus-5", phase="tailor",
+                          cost_usd=99.0,
+                          created_at=datetime.now(timezone.utc) - timedelta(days=1)))
+    assert db.spend_today(user.id) == pytest.approx(0.50)
+
+
+def test_cap_blocks_once_reached(db, user, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 1.0)
+    assert db.is_over_daily_cap(user.id) is False
+    db.record_usage(user.id, "claude-opus-5", "tailor", cost_usd=1.0)
+    assert db.is_over_daily_cap(user.id) is True
+    assert user.id in db.users_over_daily_cap()
+
+
+def test_a_per_user_cap_overrides_the_default(db, user, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 1.0)
+    db.update_user(user.id, daily_spend_cap_usd=50.0)
+    db.record_usage(user.id, "claude-opus-5", "tailor", cost_usd=10.0)
+    assert db.is_over_daily_cap(user.id) is False
+
+
+def test_a_zero_cap_disables_the_limit(db, user, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 0.0)
+    db.record_usage(user.id, "claude-opus-5", "tailor", cost_usd=999.0)
+    assert db.is_over_daily_cap(user.id) is False
+    assert db.users_over_daily_cap() == set()
+
+
+def test_capped_users_are_skipped_when_claiming(db, user, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 1.0)
+    other = db.create_user("eve@example.com", "$argon2id$fake")
+    db.enqueue_job(user.id, job_url="https://x.com/1")
+    db.enqueue_job(other.id, job_url="https://x.com/2")
+    db.record_usage(user.id, "claude-opus-5", "tailor", cost_usd=5.0)
+
+    claimed = db.claim_next_job(exclude_users=db.users_over_daily_cap())
+    assert claimed.user_id == other.id
+
+
+# ---------------- model tiering ----------------
+
+
+def test_bulk_and_priority_use_different_models(db, user):
+    assert db.model_for_job(user.id, priority=False) == settings.LLM_MODEL_BULK
+    assert db.model_for_job(user.id, priority=True) == settings.LLM_MODEL_PRIORITY
+    assert "haiku" in settings.LLM_MODEL_BULK.lower()
+
+
+def test_per_user_model_overrides_apply(db, user):
+    db.update_user(user.id, model_bulk="claude-sonnet-5")
+    assert db.model_for_job(user.id, priority=False) == "claude-sonnet-5"
+
+
+# ---------------- digest ----------------
+
+
+def _digest_user(db, hour=0, offset=0):
+    user = db.create_user("digest@example.com", "$argon2id$fake")
+    db.update_user(user.id, notify_mode="digest", notify_digest_hour=hour,
+                   notify_utc_offset_minutes=offset)
+    return db.get_user(user.id)
+
+
+def test_digest_is_due_only_when_something_is_blocked(db):
+    from database.models import ActionKind
+
+    user = _digest_user(db, hour=0)
+    assert db.users_due_for_digest() == []          # nothing to report
+
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+    assert db.users_due_for_digest() == [(user.id, 1)]
+
+
+def test_digest_is_not_due_before_the_chosen_hour(db):
+    from database.models import ActionKind
+
+    user = _digest_user(db, hour=23, offset=-23 * 60)
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+    assert db.users_due_for_digest() == []
+
+
+def test_digest_is_sent_once_per_day(db):
+    from database.models import ActionKind
+
+    user = _digest_user(db, hour=0)
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+    assert db.users_due_for_digest() == [(user.id, 1)]
+
+    db.mark_digest_sent(user.id)
+    assert db.users_due_for_digest() == []
+
+
+def test_immediate_mode_users_never_appear_in_the_digest(db):
+    from database.models import ActionKind
+
+    user = db.create_user("now@example.com", "$argon2id$fake")
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+    assert db.users_due_for_digest() == []
+
+
+def test_digest_mode_suppresses_per_block_alerts(db):
+    """The whole point: a hundred blocks make no noise until the summary."""
+    from automation.notifier import Notifier
+    from web.queue_worker import ParkRegistry, QueueGatekeeper
+
+    class Recorder:
+        name = "test"
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, notice):
+            self.sent.append(notice)
+
+    channel = Recorder()
+    user = _digest_user(db, hour=0)
+    job = db.enqueue_job(user.id, job_url="https://x.com/1")
+
+    keeper = QueueGatekeeper(db, user.id, job.id, ParkRegistry(),
+                             Notifier(db, channels=[channel]), lambda: None, lambda: None)
+    keeper._notify("something blocked", "needs you")
+    assert channel.sent == []
+
+    db.update_user(user.id, notify_mode="immediate")
+    keeper._notify("something blocked", "needs you")
+    assert len(channel.sent) == 1
+
+
+# ---------------- discovery as a queued job ----------------
+
+
+def test_discovery_queues_tailor_jobs_with_descriptions_attached(db, user, monkeypatch):
+    """Board postings carry their own description, so no page fetch is needed."""
+    from web.runner import run_discovery_job
+
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    criteria = DiscoveryCriteria(titles=["backend"], max_postings=5)
+    job = db.enqueue_job(user.id, kind="discover",
+                         job_description=criteria.model_dump_json())
+
+    class FakeEngine:
+        def __init__(self, **kw):
+            pass
+
+        def run(self, criteria, already_applied=(), seen_keys=None):
+            return {
+                "companies": [CompanySuggestion(name="Acme")],
+                "postings": [posting(external_id="1", description="Python and Kubernetes."),
+                             posting(external_id="2", url="https://boards.greenhouse.io/acme/jobs/2",
+                                     description="Go and gRPC.")],
+                "problems": [],
+                "notes": "",
+            }
+
+    monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
+    run_discovery_job(db, job.id, user.id, gatekeeper=None)
+
+    queued = [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]
+    assert len(queued) == 2
+    assert all(j.job_description for j in queued), "descriptions must come from the board"
+    assert db.get_job(job.id).status.value == "Done"
+
+
+def test_discovery_skips_postings_already_applied_to(db, user, monkeypatch):
+    from web.runner import run_discovery_job
+
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    db.create_application(company="Acme", role_title="Senior Backend Engineer",
+                          job_url="https://boards.greenhouse.io/acme/jobs/1",
+                          user_id=user.id)
+    job = db.enqueue_job(user.id, kind="discover",
+                         job_description=DiscoveryCriteria().model_dump_json())
+
+    class FakeEngine:
+        def __init__(self, **kw):
+            pass
+
+        def run(self, criteria, already_applied=(), seen_keys=None):
+            assert "Acme" in already_applied, "applied companies must be excluded upstream"
+            return {"companies": [], "postings": [posting(external_id="1")],
+                    "problems": [], "notes": ""}
+
+    monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
+    run_discovery_job(db, job.id, user.id, gatekeeper=None)
+
+    assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []
+
+
+def test_discovery_respects_the_daily_application_cap(db, user, monkeypatch):
+    from web.runner import run_discovery_job
+
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 3)
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    job = db.enqueue_job(user.id, kind="discover",
+                         job_description=DiscoveryCriteria().model_dump_json())
+
+    class FakeEngine:
+        def __init__(self, **kw):
+            pass
+
+        def run(self, criteria, already_applied=(), seen_keys=None):
+            return {"companies": [],
+                    "postings": [posting(external_id=str(i),
+                                         url=f"https://boards.greenhouse.io/acme/jobs/{i}")
+                                 for i in range(10)],
+                    "problems": [], "notes": ""}
+
+    monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
+    run_discovery_job(db, job.id, user.id, gatekeeper=None)
+
+    assert len([j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]) == 3
+
+
+def test_discovery_stops_when_the_daily_cap_is_already_spent(db, user, monkeypatch):
+    from web.runner import run_discovery_job
+
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 1)
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    db.create_application(company="X", role_title="Y", job_url="https://x.com/1",
+                          user_id=user.id)
+    job = db.enqueue_job(user.id, kind="discover",
+                         job_description=DiscoveryCriteria().model_dump_json())
+
+    class FakeEngine:
+        def __init__(self, **kw):
+            pass
+
+        def run(self, *a, **k):
+            return {"companies": [], "postings": [posting()], "problems": [], "notes": ""}
+
+    monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
+    run_discovery_job(db, job.id, user.id, gatekeeper=None)
+
+    assert "cap already reached" in db.get_job(job.id).message
+    assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []
+
+
+def test_the_spend_cap_check_is_a_fixed_number_of_queries(db, monkeypatch):
+    """Regression: this ran once per user per dispatcher tick — four times a
+    second — and the resulting query storm hung the whole test suite."""
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 1.0)
+    for i in range(25):
+        u = db.create_user(f"u{i}@example.com", "$argon2id$fake")
+        db.record_usage(u.id, "claude-opus-5", "tailor", cost_usd=2.0)
+
+    calls = {"n": 0}
+    original = db.get_user
+
+    def counting_get_user(user_id):
+        calls["n"] += 1
+        return original(user_id)
+
+    monkeypatch.setattr(db, "get_user", counting_get_user)
+    assert len(db.users_over_daily_cap()) == 25
+    assert calls["n"] == 0, "must not fetch each user individually"
+
+
+def test_capped_set_is_cached_between_dispatcher_ticks(db, monkeypatch):
+    from automation.notifier import Notifier
+    from web.queue_worker import QueueWorker
+
+    monkeypatch.setattr(settings, "DAILY_SPEND_CAP_USD", 1.0)
+    worker = QueueWorker(db, slots=1, notifier=Notifier(db, channels=[]))
+
+    calls = {"n": 0}
+    original = db.users_over_daily_cap
+
+    def counting():
+        calls["n"] += 1
+        return original()
+
+    monkeypatch.setattr(db, "users_over_daily_cap", counting)
+    for _ in range(50):
+        worker._capped_users()
+
+    assert calls["n"] == 1, "the ceiling must be recomputed on a timer, not per tick"

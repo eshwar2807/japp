@@ -98,17 +98,22 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     if not api_key and not settings.ANTHROPIC_API_KEY:
         raise RuntimeError("Add your Anthropic API key in Settings first.")
 
-    db.log_event(user_id, "tailor_start", f"Tailoring for {job.job_url}")
+    db.log_event(user_id, "tailor_start",
+                 f"Tailoring for {job.job_url} on {model}"
+                 f"{' (priority)' if job.priority else ''}")
 
     jd_text = job.job_description
     if not jd_text:
         db.log_event(user_id, "fetch_jd", "Fetching the posting")
         jd_text = fetch_job_description(job.job_url)
 
+    # Bulk discovery work runs on the cheap tier; roles you flag as priority
+    # get the expensive one. At a hundred a day this is most of the bill.
+    model = db.model_for_job(user_id, bool(job.priority))
     application_ref: list[int | None] = [job.application_id]
     optimizer = ATSOptimizer(
-        profile=profile, api_key=api_key,
-        on_usage=usage_recorder(db, user_id, application_ref, settings.LLM_MODEL),
+        profile=profile, model=model, api_key=api_key,
+        on_usage=usage_recorder(db, user_id, application_ref, model),
     )
     resume, keywords = optimizer.run(
         jd_text,
@@ -231,3 +236,72 @@ def run_apply_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         db.finish_job(job_id, JobStatus.FAILED,
                       f"Not submitted. {len(outcome.escalations)} item(s) need you.",
                       application_id=application.id)
+
+
+# --------------------------------------------------------------------------
+# Discovery
+# --------------------------------------------------------------------------
+
+
+def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
+    """Find companies that are hiring, then queue their real postings.
+
+    Board-sourced postings arrive with their full description attached, so the
+    tailor jobs this queues need no browser fetch at all.
+    """
+    import json as _json
+
+    from engine.discovery import DiscoveryCriteria, DiscoveryEngine
+
+    job = db.get_job(job_id)
+    if job is None:
+        raise RuntimeError(f"No job #{job_id}.")
+
+    api_key = db.get_anthropic_key(user_id)
+    if not api_key and not settings.ANTHROPIC_API_KEY:
+        raise RuntimeError("Add your Anthropic API key in Settings first.")
+
+    try:
+        criteria = DiscoveryCriteria.model_validate(_json.loads(job.job_description or "{}"))
+    except (ValueError, _json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Discovery criteria are not valid: {exc}") from exc
+
+    # Never queue a company already applied to, and never re-queue a posting.
+    existing = db.list_applications(limit=1000, user_id=user_id)
+    already_applied = sorted({a.company for a in existing if a.company})
+    seen_urls = {a.job_url for a in existing if a.job_url}
+
+    application_ref: list[int | None] = [None]
+    engine = DiscoveryEngine(
+        api_key=api_key,
+        on_usage=usage_recorder(db, user_id, application_ref, settings.LLM_MODEL_DISCOVERY),
+    )
+    db.log_event(user_id, "discovery_start", f"Searching for: {criteria.describe()}")
+
+    result = engine.run(criteria, already_applied=already_applied)
+    postings = [p for p in result["postings"] if p.url not in seen_urls]
+
+    # Respect the remaining daily allowance rather than dumping 500 jobs in.
+    remaining = max(settings.DAILY_APPLICATION_CAP - db.applications_today(user_id), 0)
+    if remaining <= 0:
+        db.finish_job(job_id, JobStatus.DONE,
+                      "Daily application cap already reached; queued nothing.")
+        return
+    postings = postings[:remaining]
+
+    batch_id = f"disc{job_id}"
+    for posting in postings:
+        db.enqueue_job(
+            user_id, kind="tailor", job_url=posting.url,
+            # The board already gave us the description, so no page fetch later.
+            job_description=posting.description or None,
+            batch_id=batch_id,
+        )
+
+    for problem in result["problems"][:10]:
+        db.log_event(user_id, "discovery_problem", problem, level=LogLevel.WARNING)
+
+    message = (f"{len(result['companies'])} companies searched, "
+               f"{len(postings)} postings queued")
+    db.log_event(user_id, "discovery_done", message)
+    db.finish_job(job_id, JobStatus.DONE, message)

@@ -52,7 +52,7 @@ ENV JP_DATA_DIR=/data \
     JP_BROWSER_PROFILE=/data/browser_profile \
     JP_WEB_HOST=0.0.0.0 \
     JP_WEB_PORT=8080 \
-    JP_WORKER_KINDS=tailor
+    JP_WORKER_KINDS=tailor,discover
 
 EXPOSE 8080
 

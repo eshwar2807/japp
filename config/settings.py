@@ -57,6 +57,20 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # None -> SDK resolves from 
 # (output_config.format / messages.parse) plus a fixed, fully-specified prompt.
 # LLM_TEMPERATURE is only sent when LLM_MODEL is a legacy model that accepts it.
 LLM_MODEL = os.getenv("JP_LLM_MODEL", "claude-opus-5")
+# Tiered models. Bulk work from the discovery queue runs on the cheap tier;
+# postings you mark as priority get the expensive one. At 100 applications a
+# day this is the difference between ~$70 and ~$1,000 a month.
+LLM_MODEL_BULK = os.getenv("JP_LLM_MODEL_BULK", "claude-haiku-4-5")
+LLM_MODEL_PRIORITY = os.getenv("JP_LLM_MODEL_PRIORITY", "claude-opus-5")
+# Discovery reasons over live web results, which the current web-search tool
+# only supports on Opus/Sonnet tier - Haiku cannot run it.
+LLM_MODEL_DISCOVERY = os.getenv("JP_LLM_MODEL_DISCOVERY", "claude-opus-5")
+
+# Hard ceiling on LLM spend per user per day. The queue pauses rather than
+# billing past it; 0 disables the cap.
+DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
+# Applications the discovery queue may enqueue per user per day.
+DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "100"))
 LLM_EFFORT = os.getenv("JP_LLM_EFFORT", "high")        # low|medium|high|xhigh|max
 LLM_MAX_TOKENS = int(os.getenv("JP_LLM_MAX_TOKENS", "16000"))
 LLM_TEMPERATURE: float | None = (
@@ -122,7 +136,9 @@ LOG_RETENTION_DAYS = int(os.getenv("JP_LOG_RETENTION_DAYS", "90"))
 # Job kinds this process will run. A hosted dashboard sets JP_WORKER_KINDS=tailor
 # so browser work is left to a local agent, where a human can see the window.
 WORKER_KINDS = tuple(
-    k.strip() for k in os.getenv("JP_WORKER_KINDS", "tailor,apply").split(",") if k.strip()
+    k.strip()
+    for k in os.getenv("JP_WORKER_KINDS", "tailor,apply,discover").split(",")
+    if k.strip()
 )
 
 

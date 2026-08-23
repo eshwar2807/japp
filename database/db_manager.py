@@ -843,7 +843,10 @@ class DBManager:
             return sess.scalars(stmt).all()
 
     def claim_next_job(
-        self, kinds: tuple[str, ...] | None = None, user_id: int | None = None
+        self,
+        kinds: tuple[str, ...] | None = None,
+        user_id: int | None = None,
+        exclude_users: set[int] | None = None,
     ) -> RunJob | None:
         """Atomically move the oldest runnable job to RUNNING and return it.
 
@@ -868,6 +871,8 @@ class DBManager:
                     stmt = stmt.where(RunJob.kind.in_(kinds))
                 if user_id is not None:
                     stmt = stmt.where(RunJob.user_id == user_id)
+                if exclude_users:
+                    stmt = stmt.where(RunJob.user_id.not_in(exclude_users))
                 job = sess.scalars(stmt).first()
                 if job is None:
                     continue
@@ -1108,3 +1113,124 @@ class DBManager:
             user.session_epoch = (user.session_epoch or 1) + 1
             sess.flush()
             return user
+
+    # ======================================================================
+    # Spend control
+    # ======================================================================
+
+    def spend_today(self, user_id: int) -> float:
+        """USD spent since midnight UTC. The cap is enforced against this."""
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            total = sess.scalar(
+                select(func.coalesce(func.sum(LLMUsage.cost_usd), 0.0)).where(
+                    LLMUsage.user_id == user_id, LLMUsage.created_at >= start
+                )
+            )
+        return round(float(total or 0.0), 6)
+
+    def daily_cap_for(self, user_id: int) -> float:
+        """The user's cap, falling back to the instance default. 0 disables."""
+        user = self.get_user(user_id)
+        if user is not None and user.daily_spend_cap_usd is not None:
+            return float(user.daily_spend_cap_usd)
+        from config import settings as _settings
+
+        return float(_settings.DAILY_SPEND_CAP_USD)
+
+    def is_over_daily_cap(self, user_id: int) -> bool:
+        cap = self.daily_cap_for(user_id)
+        return cap > 0 and self.spend_today(user_id) >= cap
+
+    def users_over_daily_cap(self) -> set[int]:
+        """Every user whose spend has hit their ceiling today.
+
+        The dispatcher skips these rather than blocking each of their queued
+        jobs one at a time, which would churn through a hundred rows to say the
+        same thing a hundred times.
+        """
+        from config import settings as _settings
+
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        default_cap = float(_settings.DAILY_SPEND_CAP_USD)
+
+        # Spend per user and each user's cap in two queries, not one query per
+        # user: the dispatcher calls this on a timer, so an N+1 here becomes a
+        # steady drip of queries against the database.
+        with self.session() as sess:
+            spend = sess.execute(
+                select(LLMUsage.user_id, func.sum(LLMUsage.cost_usd))
+                .where(LLMUsage.created_at >= start, LLMUsage.user_id.is_not(None))
+                .group_by(LLMUsage.user_id)
+            ).all()
+            caps = dict(
+                sess.execute(select(User.id, User.daily_spend_cap_usd)).all()
+            )
+
+        over = set()
+        for user_id, spent in spend:
+            cap = caps.get(user_id)
+            cap = float(cap) if cap is not None else default_cap
+            if cap > 0 and float(spent or 0.0) >= cap:
+                over.add(int(user_id))
+        return over
+
+    def applications_today(self, user_id: int) -> int:
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            return int(
+                sess.scalar(
+                    select(func.count(Application.id)).where(
+                        Application.user_id == user_id, Application.created_at >= start
+                    )
+                )
+                or 0
+            )
+
+    def model_for_job(self, user_id: int, priority: bool) -> str:
+        """Tiered model choice: cheap for bulk, expensive for flagged roles."""
+        from config import settings as _settings
+
+        user = self.get_user(user_id)
+        if priority:
+            return (user.model_priority if user and user.model_priority
+                    else _settings.LLM_MODEL_PRIORITY)
+        return (user.model_bulk if user and user.model_bulk
+                else _settings.LLM_MODEL_BULK)
+
+    # ======================================================================
+    # Digest
+    # ======================================================================
+
+    def users_due_for_digest(self) -> list[tuple[int, int]]:
+        """(user_id, open_block_count) for digests that should go out now.
+
+        Due means: digest mode, the user's local hour has reached their chosen
+        hour, nothing sent yet in their local day, and something to report.
+        """
+        due: list[tuple[int, int]] = []
+        now = datetime.now(timezone.utc)
+
+        for user in self.list_users(limit=1000):
+            if (user.notify_mode or "immediate") != "digest" or not user.is_active:
+                continue
+            offset = timedelta(minutes=int(user.notify_utc_offset_minutes or 0))
+            local_now = now + offset
+            if local_now.hour < int(user.notify_digest_hour or 18):
+                continue
+            if user.last_digest_at is not None:
+                last = user.last_digest_at
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                if (last + offset).date() == local_now.date():
+                    continue        # already sent today, local time
+            blocked = self.count_open_actions(user.id)
+            if blocked:
+                due.append((user.id, blocked))
+        return due
+
+    def mark_digest_sent(self, user_id: int) -> None:
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user:
+                user.last_digest_at = datetime.now(timezone.utc)
