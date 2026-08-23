@@ -171,6 +171,8 @@ class LLMAnswerResolver:
             + "\n</QUESTIONS>\n\nAnswer only what the facts support."
         )
 
+        from engine.llm import request_params
+
         try:
             response = self.client.parse(
                 model=self.model,
@@ -178,7 +180,7 @@ class LLMAnswerResolver:
                 system=RESOLVER_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
                 output_format=ResolverBatch,
-                thinking={"type": "adaptive"},
+                **request_params(self.model),
             )
         except Exception:
             # A resolver failure must never fail the application; the fields

@@ -316,15 +316,17 @@ class ATSOptimizer:
         return self._client
 
     def _call(self, system: str, prompt: str, output_format: type, phase: str = "") -> Any:
+        from engine.llm import request_params
+
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": settings.LLM_MAX_TOKENS,
             "system": system,
             "messages": [{"role": "user", "content": prompt}],
             "output_format": output_format,
-            # Adaptive thinking; the SDK merges `format` into output_config for us.
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": settings.LLM_EFFORT},
+            # Thinking and effort follow the model: the bulk tier rejects both.
+            # The SDK merges `format` into output_config for us.
+            **request_params(self.model, settings.LLM_EFFORT),
         }
         # Only legacy models accept sampling params; current ones return 400.
         if settings.LLM_TEMPERATURE is not None and settings.uses_sampling_params(self.model):

@@ -234,6 +234,8 @@ class ResumeImporter:
         return self._client
 
     def parse(self, text: str) -> ImportedProfile:
+        from engine.llm import request_params
+
         response = self.client.parse(
             model=self.model,
             max_tokens=settings.LLM_MAX_TOKENS,
@@ -241,7 +243,7 @@ class ResumeImporter:
             messages=[{"role": "user", "content":
                        "<RESUME>\n" + text + "\n</RESUME>\n\nTranscribe it."}],
             output_format=ImportedProfile,
-            thinking={"type": "adaptive"},
+            **request_params(self.model),
         )
         if self.on_usage is not None:
             try:

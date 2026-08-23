@@ -21,6 +21,7 @@ from typing import Any, Sequence
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import settings
+from engine.llm import request_params
 from engine.boards import (
     BoardError,
     Posting,
@@ -189,8 +190,7 @@ class DiscoveryEngine:
                 messages=messages,
                 tools=[WEB_SEARCH_TOOL],
                 output_format=CompanySearchResult,
-                thinking={"type": "adaptive"},
-                output_config={"effort": settings.LLM_EFFORT},
+                **request_params(self.model, settings.LLM_EFFORT),
             )
             if self.on_usage is not None:
                 try:
