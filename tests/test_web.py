@@ -86,6 +86,22 @@ def _form_token(client, path: str) -> str:
     return re.search(r'name="csrf_token" value="([^"]*)"', client.get(path).text).group(1)
 
 
+def _profile_form_fields() -> dict:
+    """The minimum a profile form post needs to validate."""
+    return {
+        "full_name": "Ada Lovelace", "email": "ada@example.com",
+        "phone": "+1-555-010-0100", "city": "Austin", "summary": "Engineer.",
+        "skills_hard": "Python", "exp_0_company": "Analytical Engines",
+        "exp_0_title": "Principal Engineer", "exp_0_start_date": "2021-03",
+        "exp_0_is_current": "on", "exp_0_bullets": "Cut p99 latency 60%.",
+        "edu_0_institution": "University of London",
+        "legal_work_authorization_us": "Yes",
+        "legal_requires_sponsorship_now_or_future": "No",
+        "legal_earliest_start_date": "2026-09-01",
+        "legal_desired_salary": "185000",
+    }
+
+
 def csrf(client) -> str:
     client.get("/")
     return client.cookies.get("jp_csrf") or ""
@@ -857,3 +873,136 @@ def test_discovery_criteria_are_scoped_per_user(web):
     other = TestClient(web.app, follow_redirects=False)
     signup(other, "eve@example.com")
     assert "Quantum Cartographer" not in other.get("/discover").text
+
+
+# ---------------- resume import in the portal ----------------
+
+
+def _fake_importer(monkeypatch, imported=None, fail=False):
+    from engine import resume_import
+
+    class Fake:
+        def __init__(self, **kw):
+            pass
+
+        def parse(self, text):
+            if fail:
+                raise RuntimeError("model unavailable")
+            from engine.resume_import import ImportedExperience, ImportedProfile
+
+            return imported or ImportedProfile(
+                full_name="Ada Lovelace", email="ada@example.com", city="Austin",
+                skills_tooling=["Go", "Kubernetes"],
+                experience=[ImportedExperience(company="Analytical Engines",
+                                               title="Principal Engineer",
+                                               start_date="2021-03", is_current=True,
+                                               bullets=["Cut p99 latency 60%."])],
+                uncertain=["End date on the second role was a year only."])
+
+    monkeypatch.setattr(resume_import, "ResumeImporter", Fake)
+
+
+RESUME_BYTES = (b"Ada Lovelace\nPrincipal Backend Engineer, Analytical Engines\n"
+                b"Cut p99 API latency from 840ms to 210ms.\n" + b"x" * 300)
+
+
+def test_resume_import_creates_a_draft_and_does_not_save_it(web, monkeypatch):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+    _fake_importer(monkeypatch)
+
+    response = web.post("/profile/import",
+                        files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+                        data={"csrf_token": csrf(web)})
+    assert response.status_code == 303
+
+    # Draft exists; the live profile is untouched.
+    assert web.db.get_pending_profile(user.id) is not None
+    assert web.db.get_profile(user.id) is None
+
+    page = web.get("/profile").text
+    assert "not saved yet" in page
+    assert "Analytical Engines" in page
+    assert "year only" in page              # uncertainty surfaced for checking
+
+
+def test_saving_the_form_commits_the_import_and_clears_the_draft(web, monkeypatch):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+    _fake_importer(monkeypatch)
+    web.post("/profile/import", files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+             data={"csrf_token": csrf(web)})
+
+    web.post("/profile", data={**_profile_form_fields(), "csrf_token": csrf(web)})
+
+    assert web.db.get_pending_profile(user.id) is None
+    assert web.db.get_profile(user.id)["contact"]["full_name"] == "Ada Lovelace"
+
+
+def test_an_import_can_be_discarded(web, monkeypatch):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+    _fake_importer(monkeypatch)
+    web.post("/profile/import", files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+             data={"csrf_token": csrf(web)})
+
+    web.post("/profile/import/discard", data={"csrf_token": csrf(web)})
+    assert web.db.get_pending_profile(user.id) is None
+
+
+def test_unsupported_file_types_are_refused(web, monkeypatch):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    response = web.post("/profile/import",
+                        files={"resume": ("photo.png", b"x" * 400, "image/png")},
+                        data={"csrf_token": csrf(web)})
+    assert "Unsupported" in response.headers["location"]
+    assert web.db.get_pending_profile(user.id) is None
+
+
+def test_import_requires_an_api_key(web):
+    signup(web, "ada@example.com")
+    response = web.post("/profile/import",
+                        files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+                        data={"csrf_token": csrf(web)})
+    assert response.headers["location"].startswith("/settings")
+
+
+def test_a_failed_import_leaves_the_profile_alone(web, monkeypatch):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+    web.db.save_profile(user.id, _ready_profile())
+    _fake_importer(monkeypatch, fail=True)
+
+    response = web.post("/profile/import",
+                        files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+                        data={"csrf_token": csrf(web)})
+    assert "error=" in response.headers["location"]
+    assert web.db.get_pending_profile(user.id) is None
+    assert web.db.get_profile(user.id)["contact"]["full_name"] == "Ada Lovelace"
+
+
+def test_import_requires_csrf(web):
+    signup(web, "ada@example.com")
+    response = web.post("/profile/import",
+                        files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")})
+    assert response.status_code == 403
+
+
+def test_another_user_cannot_see_your_draft(web, monkeypatch):
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    web.db.set_anthropic_key(ada.id, "sk-ant-test")
+    _fake_importer(monkeypatch)
+    web.post("/profile/import", files={"resume": ("cv.txt", RESUME_BYTES, "text/plain")},
+             data={"csrf_token": csrf(web)})
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    assert "Analytical Engines" not in other.get("/profile").text

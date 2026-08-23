@@ -110,18 +110,96 @@ def overview(request: Request, user: CurrentUser, db: Database):
 @router.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, user: CurrentUser, db: Database,
                  welcome: int = 0, ok: str = "", error: str = ""):
-    profile = db.get_profile(user.id)
-    if profile is None:
-        profile = blank_profile()
-        profile["contact"]["email"] = user.email
+    pending = db.get_pending_profile(user.id)
+    if pending:
+        # Show the imported draft, clearly flagged. It is not profile data
+        # until the user reviews it and presses Save.
+        profile = pending.get("profile") or blank_profile()
+        uncertain = pending.get("uncertain") or []
+    else:
+        profile = db.get_profile(user.id)
+        uncertain = []
+        if profile is None:
+            profile = blank_profile()
+            profile["contact"]["email"] = user.email
+
     return render(
         request, "profile.html", user, db,
         profile=profile,
         readiness=completeness(profile),
         legal_fields=LEGAL_FIELDS,
         disclosure_fields=DISCLOSURE_FIELDS,
+        pending_import=bool(pending),
+        uncertain=uncertain,
+        max_upload_mb=_max_upload_mb(),
         welcome=bool(welcome), ok=ok, error=error,
     )
+
+
+def _max_upload_mb() -> int:
+    from engine.resume_import import MAX_UPLOAD_BYTES
+
+    return MAX_UPLOAD_BYTES // 1_048_576
+
+
+@router.post("/profile/import")
+async def import_resume(request: Request, user: CurrentUser, db: Database,
+                        _csrf: None = CSRFProtected):
+    """Read an uploaded resume into a draft profile for review."""
+    from engine.resume_import import (
+        MAX_UPLOAD_BYTES,
+        ResumeImportError,
+        ResumeImporter,
+        detect_kind,
+        extract_text,
+        to_profile,
+    )
+
+    form = await request.form()
+    upload = form.get("resume")
+    if upload is None or not getattr(upload, "filename", ""):
+        return _redirect("/profile", error="Choose a resume file to import.")
+
+    api_key = db.get_anthropic_key(user.id)
+    if not api_key and not settings.ANTHROPIC_API_KEY:
+        return _redirect("/settings", error="Add your Anthropic API key before importing.")
+
+    try:
+        data = await upload.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ResumeImportError(
+                f"File is too large; the limit is {MAX_UPLOAD_BYTES // 1_048_576}MB.")
+        kind = detect_kind(upload.filename, getattr(upload, "content_type", "") or "")
+        text = extract_text(data, kind)
+    except ResumeImportError as exc:
+        return _redirect("/profile", error=str(exc)[:250])
+    finally:
+        # The document itself is never stored: only what was read out of it.
+        data = b""
+
+    importer = ResumeImporter(api_key=api_key)
+    try:
+        imported = importer.parse(text)
+    except Exception as exc:
+        db.log_event(user.id, "resume_import_failed", str(exc)[:300], level=LogLevel.ERROR)
+        return _redirect("/profile", error=f"Could not read that resume: {exc}"[:250])
+
+    draft = to_profile(imported, db.get_profile(user.id))
+    db.save_pending_profile(user.id, draft, imported.uncertain)
+    db.log_event(user.id, "resume_imported",
+                 f"Imported {upload.filename}: {len(imported.experience)} role(s), "
+                 f"{len(imported.uncertain)} item(s) to check")
+
+    return _redirect("/profile",
+                     ok=f"Read {len(imported.experience)} role(s) from {upload.filename}. "
+                        "Check everything below, then Save.")
+
+
+@router.post("/profile/import/discard")
+def discard_import(request: Request, user: CurrentUser, db: Database,
+                   _csrf: None = CSRFProtected):
+    db.clear_pending_profile(user.id)
+    return _redirect("/profile", ok="Import discarded.")
 
 
 @router.post("/profile")
@@ -140,6 +218,7 @@ async def save_profile(request: Request, user: CurrentUser, db: Database,
         return _redirect("/profile", error=f"Profile is not valid: {exc}"[:300])
 
     db.save_profile(user.id, profile)
+    db.clear_pending_profile(user.id)
     db.log_event(user.id, "profile_saved",
                  f"Profile saved ({completeness(profile)['percent']}% complete)")
     return _redirect("/profile", ok="Profile saved")

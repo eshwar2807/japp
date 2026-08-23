@@ -1243,3 +1243,28 @@ class DBManager:
 
     def get_discovery_criteria(self, user_id: int) -> dict | None:
         return (self.get_profile(user_id) or {}).get("_discovery")
+
+    def save_pending_profile(self, user_id: int, profile: dict, notes: list[str] | None = None) -> None:
+        """Stash an imported profile for review. Not live until the user saves."""
+        payload = {"profile": profile, "uncertain": notes or []}
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user is None:
+                raise ValueError(f"No user with id {user_id}.")
+            user.pending_profile_json = json.dumps(payload)
+
+    def get_pending_profile(self, user_id: int) -> dict | None:
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user is None or not user.pending_profile_json:
+                return None
+        try:
+            return json.loads(user.pending_profile_json)
+        except json.JSONDecodeError:
+            return None
+
+    def clear_pending_profile(self, user_id: int) -> None:
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user:
+                user.pending_profile_json = None

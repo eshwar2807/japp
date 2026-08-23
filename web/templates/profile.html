@@ -22,6 +22,40 @@
   {% endif %}
 </div>
 
+{% if pending_import %}
+<div class="card card-warn">
+  <h2>Imported from your resume — not saved yet</h2>
+  <p class="sub">Everything below was read out of the file. PDF extraction
+    garbles dates and merges columns, so check it before saving. Nothing is
+    stored until you press Save at the bottom.</p>
+  {% if uncertain %}
+  <h3 class="mt-4">Worth checking</h3>
+  <ul class="bullets">
+    {% for item in uncertain %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  <form method="post" action="/profile/import/discard" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn-ghost btn-sm" type="submit">Discard the import</button>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h2>Import from a resume</h2>
+  <p class="sub">Upload an existing resume and it fills this form in for you to
+    check. Work authorisation, sponsorship and voluntary disclosures are never
+    read from a resume — they are not on one — so you still answer those below.</p>
+  <form method="post" action="/profile/import" enctype="multipart/form-data" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><label for="resume">Resume file</label>
+      <input id="resume" type="file" name="resume" accept=".pdf,.docx,.txt,.md" required>
+      <p class="hint">PDF, DOCX, TXT or Markdown, up to {{ max_upload_mb }}MB.
+        The file itself is not stored — only what is read out of it.</p></div>
+    <button type="submit">Read my resume</button>
+  </form>
+</div>
+{% endif %}
+
 <form method="post" action="/profile">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 

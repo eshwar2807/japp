@@ -12,7 +12,8 @@ cryptography>=42.0.0
 # --- Resume rendering ---
 Jinja2>=3.1.4
 weasyprint>=62.0
-pypdf>=4.2.0              # PDF text-extraction verification            # needs system libs: pango, gdk-pixbuf, libffi
+pypdf>=4.2.0              # PDF text extraction (verify + resume import)
+python-docx>=1.1.0        # DOCX resume import            # needs system libs: pango, gdk-pixbuf, libffi
 
 # --- Browser automation ---
 playwright>=1.45.0          # run: playwright install chromium

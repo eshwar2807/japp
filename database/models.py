@@ -208,6 +208,9 @@ class User(Base):
 
     #: The user's master profile, as JSON. Same schema as master_profile.json.
     profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: A resume import awaiting review. Never treated as profile data until the
+    #: user saves the form, because extraction can misread a date or employer.
+    pending_profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     #: Grants the /admin view. The first account created becomes admin, or set
