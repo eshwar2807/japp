@@ -64,26 +64,55 @@ def is_java_role(title: str, description: str) -> bool:
 # Experience
 # --------------------------------------------------------------------------
 
-_YEARS = re.compile(
-    r"(\d{1,2})\s*(?:\+|plus)?\s*(?:-|–|to)?\s*(\d{1,2})?\s*\+?\s*years?"
-    r"(?:\s+of)?(?:\s+\w+){0,3}?\s+experience",
+#: Any "N years" / "N+ years" / "3-5 years" mention. Deliberately loose: the
+#: requirement is often written before the number rather than after it, as in
+#: "Extensive experience (typically 8+ years) building backend systems", which
+#: an experience-must-follow pattern missed entirely.
+_YEARS = re.compile(r"(\d{1,2})\s*(?:\+|plus)?\s*(?:-|–|to)?\s*(\d{1,2})?\s*\+?\s*years?",
+                    re.IGNORECASE)
+
+#: Words that make a nearby year count a requirement rather than prose.
+_REQUIREMENT_CONTEXT = re.compile(
+    r"\b(experience|experienced|background|building|developing|working|worked|"
+    r"professional|industry|engineering|development|minimum|at\s+least|"
+    r"required|require|qualification|proficien\w+|expertise|track\s+record|"
+    r"hands.on|equivalent)\b",
+    re.IGNORECASE,
+)
+
+#: Narrative uses of a year count: company history, forward-looking statements.
+_NARRATIVE_CONTEXT = re.compile(
+    r"\b(next|coming|past|last|ago|since|founded|history|anniversary|"
+    r"over\s+the|coming\s+years|coming\s+decade|coming\s+months)\b",
     re.IGNORECASE,
 )
 
 
 def years_required(description: str) -> int | None:
-    """The lowest number of years the posting asks for, if it says.
+    """The highest number of years the posting demands, if it demands any.
 
-    Takes the minimum across all mentions: a posting saying "5+ years backend,
-    8+ years leadership" is gated at five for an individual contributor, and
-    treating it as eight would discard a viable role.
+    Takes the maximum rather than the minimum. A posting asking for "8+ years
+    of backend experience" and "2+ years of Kubernetes" is an eight-year role
+    with a secondary skill, and reading it as a two-year role let a Staff
+    opening past a six-year ceiling. If any stated requirement is above the
+    ceiling, the role is above the candidate's level.
+
+    Only mentions sitting next to requirement language count: "the next few
+    years" and "founded 12 years ago" are not requirements.
     """
+    text = description or ""
     values = []
-    for match in _YEARS.finditer(description or ""):
+    for match in _YEARS.finditer(text):
         low = int(match.group(1))
-        if 0 < low <= 30:
-            values.append(low)
-    return min(values) if values else None
+        if not 0 < low <= 30:
+            continue
+        window = text[max(match.start() - 90, 0): match.end() + 90]
+        if _NARRATIVE_CONTEXT.search(window):
+            continue
+        if not _REQUIREMENT_CONTEXT.search(window):
+            continue
+        values.append(low)
+    return max(values) if values else None
 
 
 # --------------------------------------------------------------------------

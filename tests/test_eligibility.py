@@ -53,17 +53,41 @@ def test_non_java_roles_are_rejected(title, description):
     ("Minimum 8 years of software engineering experience", 8),
     ("3-5 years experience required", 3),
     ("10+ years of relevant experience", 10),
+    ("At least 6 years working with Java", 6),
     ("No number given here", None),
 ])
 def test_years_required_is_read_from_the_posting(text, expected):
     assert years_required(text) == expected
 
 
-def test_the_lowest_stated_requirement_wins():
-    """"5+ years backend, 8+ years leadership" gates an IC at five; reading it
-    as eight would discard a viable role."""
-    assert years_required("5+ years of backend experience and "
-                          "8+ years of leadership experience") == 5
+def test_a_requirement_written_before_the_number_is_found():
+    """A Staff role at 8+ years passed a six-year ceiling because the pattern
+    required the word experience to follow the number, and this posting put it
+    first: 'Extensive experience (typically 8+ years) building...'
+    """
+    assert years_required(
+        "Extensive experience (typically 8+ years) building and operating "
+        "backend distributed systems at scale"
+    ) == 8
+
+
+def test_the_highest_stated_requirement_wins():
+    """Reversed from taking the minimum. A posting wanting "8+ years backend"
+    and "2+ years Kubernetes" is an eight-year role with a secondary skill;
+    reading it as a two-year role let Staff openings through."""
+    assert years_required("8+ years of backend experience. "
+                          "2+ years of Kubernetes experience.") == 8
+
+
+@pytest.mark.parametrize("text", [
+    "We believe the way people interact with their finances will improve in "
+    "the next few years",
+    "Founded 12 years ago, we now serve millions of customers",
+    "Over the past 5 years we have grown considerably",
+])
+def test_narrative_year_counts_are_not_requirements(text):
+    """Company history and forward-looking statements are not job criteria."""
+    assert years_required(text) is None
 
 
 def test_a_role_above_the_years_limit_is_rejected():
