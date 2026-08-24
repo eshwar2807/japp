@@ -119,6 +119,13 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         jd_text,
         few_shot=lambda kw: db.successful_examples(kw.role_title, user_id=user_id),
     )
+    if resume.removed_unsupported:
+        db.log_event(
+            user_id, "fabrication_blocked",
+            "Removed skills the profile does not evidence: "
+            + ", ".join(resume.removed_unsupported),
+            level=LogLevel.WARNING,
+        )
     db.log_event(
         user_id, "tailored",
         f"{keywords.role_title} @ {keywords.company or 'unknown'} - "

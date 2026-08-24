@@ -62,6 +62,11 @@ def web(tmp_path, monkeypatch):
     deps.get_db.cache_clear()
     deps.get_sessions.cache_clear()
     deps.get_limiter.cache_clear()
+    # The worker is cached too. Without clearing it, every web test reuses one
+    # dispatcher bound to a database from the first test that ran, polling
+    # several times a second for the rest of the suite and competing with the
+    # concurrency tests.
+    deps.get_worker.cache_clear()
     monkeypatch.setattr(deps, "get_db", lambda: db)
 
     from web.app import create_app
@@ -70,7 +75,13 @@ def web(tmp_path, monkeypatch):
     app.dependency_overrides[deps.get_db] = lambda: db
     client = TestClient(app, follow_redirects=False)
     client.db = db
-    return client
+    yield client
+
+    # Stop whatever the app's lifespan started, so no dispatcher outlives the
+    # test that created it.
+    worker = deps.get_worker()
+    worker.stop(timeout=2)
+    deps.get_worker.cache_clear()
 
 
 def signup(client, email: str, password: str = GOOD_PASSWORD):

@@ -112,6 +112,84 @@ def keyword_present(keyword: str, haystack: str, threshold: int | None = None) -
     return False
 
 
+def profile_corpus(profile: MasterProfile) -> str:
+    """Every fact the profile actually contains, as one searchable string."""
+    parts = [
+        " ".join(profile.skills.flat),
+        profile.summary or "",
+    ]
+    for exp in profile.experience:
+        parts.extend([exp.company, exp.title, " ".join(exp.bullets),
+                      " ".join(exp.tech_used)])
+    for edu in profile.education:
+        parts.extend([edu.institution, edu.degree, edu.field_of_study])
+    for cert in profile.certifications:
+        parts.extend([cert.name, cert.issuer])
+    for project in profile.projects:
+        parts.append(str(project.get("name", "")))
+        parts.append(str(project.get("description", "")))
+    return "\n".join(p for p in parts if p)
+
+
+#: Words that describe *what kind* of skill something is rather than naming it.
+#: "Kubernetes orchestration" is a fair rephrasing of "Kubernetes"; "Python
+#: programming" is not a rephrasing of anything if the profile lacks Python.
+#: So the check is on the distinctive tokens, not the whole phrase.
+_GENERIC_SKILL_WORDS = {
+    "and", "or", "the", "of", "in", "for", "with", "a", "an",
+    "architecture", "architectures", "design", "designing", "development",
+    "developing", "engineering", "engineer", "management", "managing",
+    "orchestration", "automation", "automated", "systems", "system",
+    "programming", "pipeline", "pipelines", "cloud", "native", "quality",
+    "standards", "support", "practices", "principles", "based", "driven",
+    "expertise", "experience", "skills", "advanced", "modern", "scale",
+    "scalable", "distributed", "high", "availability", "performance",
+    "integration", "deployment", "testing", "migration", "modernization",
+    "leadership", "mentorship", "collaboration", "communication", "ownership",
+}
+
+
+def _distinctive_tokens(skill: str) -> list[str]:
+    tokens = re.split(r"[^a-z0-9+#.]+", (skill or "").lower())
+    return [t for t in tokens if len(t) > 1 and t not in _GENERIC_SKILL_WORDS]
+
+
+def strip_unsupported_skills(
+    draft: TailoredResumeDraft, profile: MasterProfile
+) -> tuple[TailoredResumeDraft, list[str]]:
+    """Remove highlighted skills the profile does not actually support.
+
+    The prompt forbids claiming a skill the candidate lacks, and a model on the
+    cheap tier still added "Python" and "MySQL" to a Java engineer's resume
+    because the posting asked for them. A prompt is a request; this is a check.
+
+    Returns the cleaned draft and whatever was removed, so the removal is
+    reported rather than silently swallowed.
+    """
+    corpus = profile_corpus(profile)
+    kept, removed = [], []
+    for skill in draft.highlighted_skills:
+        distinctive = _distinctive_tokens(skill)
+        if not distinctive:
+            # A phrase made entirely of generic words ("code quality and
+            # standards") names no technology, so match the whole phrase.
+            supported = keyword_present(skill, corpus)
+        else:
+            # The first distinctive token is the head of the phrase and carries
+            # the claim: "Docker containerization" claims Docker, "Python
+            # microservices" claims Python. Requiring every token instead would
+            # strip fair rephrasings like "production support and incident
+            # management"; requiring any would let "Python microservices"
+            # through on the strength of "microservices".
+            supported = keyword_present(distinctive[0], corpus)
+
+        (kept if supported else removed).append(skill)
+
+    if not removed:
+        return draft, []
+    return draft.model_copy(update={"highlighted_skills": kept}), removed
+
+
 def resume_text(tailored: TailoredResumeSchema | TailoredResumeDraft) -> str:
     """Flatten a tailored resume into the text an ATS parser would read."""
     parts = [tailored.summary, " ".join(tailored.highlighted_skills)]
@@ -416,6 +494,17 @@ class ATSOptimizer:
 
         for attempt in range(1, max_iterations + 1):
             draft = self.tailor(job_description, keywords, few_shot, missing)
+
+            # Enforce the no-fabrication rule rather than trusting it. Anything
+            # the profile does not support is removed before scoring, so an
+            # invented skill cannot inflate the match either.
+            draft, invented = strip_unsupported_skills(draft, self.profile)
+            if invented:
+                log.warning(
+                    "Removed %d unsupported skill(s) from the tailored resume: %s",
+                    len(invented), ", ".join(invented),
+                )
+
             score, detail = score_match(keywords, draft)
             log.info(
                 "Pass 2 attempt %d/%d: local score %.1f%% (model claimed %.1f%%)",
@@ -428,8 +517,15 @@ class ATSOptimizer:
             result = draft.to_schema()
             result.ats_match_percentage = score       # local score is authoritative
             result.keywords_covered = detail["covered"]
-            # Union: keywords the model admitted to, plus any the scorer could not find.
-            result.keywords_missing = sorted(set(draft.keywords_missing) | set(detail["missing"]))
+            # Union of what the model admitted to and what the scorer could not
+            # find, minus anything actually covered - a keyword must never be
+            # reported as both present and missing.
+            covered_lower = {c.lower() for c in detail["covered"]}
+            result.keywords_missing = sorted(
+                {k for k in set(draft.keywords_missing) | set(detail["missing"])
+                 if k.lower() not in covered_lower}
+            )
+            result.removed_unsupported = invented
 
             if score > best_score:
                 best, best_score = result, score

@@ -46,9 +46,10 @@ def worker(db):
     w.stop(timeout=2)
 
 
-#: Generous, because these tests wait on real threads and a 1s dispatcher poll.
-#: They return as soon as the condition holds, so a healthy run pays nothing;
-#: a tight bound only buys flakes under load.
+#: These tests wait on real OS threads and return the instant their condition
+#: holds, so a healthy run pays nothing for a generous bound. Anything that
+#: signals completion must set its event *after* committing state, or the
+#: waiter observes the job mid-flight.
 WAIT = 20.0
 
 
@@ -131,8 +132,11 @@ def test_a_parked_job_releases_its_slot_so_the_batch_continues(db, user, worker)
         gatekeeper.confirm("submit the application", ["parked for the test"])
 
     def quick_handler(db_, job_id, user_id, gatekeeper):
-        second_ran.set()
+        # Signal only after the status is committed. Setting the event first
+        # let the test observe the job mid-flight and assert Done against a
+        # row still marked Running.
         db_.finish_job(job_id, JobStatus.DONE, "done")
+        second_ran.set()
 
     calls = {"n": 0}
 

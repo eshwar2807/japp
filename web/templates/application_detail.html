@@ -107,6 +107,15 @@
   </table></div>
   {% endif %}
 
+  {% if tailored.removed_unsupported %}
+  <div class="flash flash-err mt-5">
+    <strong>{{ tailored.removed_unsupported|length }} claimed skill(s) removed:</strong>
+    {{ tailored.removed_unsupported|join(', ') }}.
+    Your profile does not evidence these, so they were stripped before the resume
+    was built. If you do have them, add them to your profile and re-tailor.
+  </div>
+  {% endif %}
+
   <div class="grid grid-2 mt-5">
     <div><h3>Keywords covered</h3>
       <div>{% for kw in tailored.keywords_covered %}<span class="tag tag-hit">{{ kw }}</span>{% endfor %}</div></div>

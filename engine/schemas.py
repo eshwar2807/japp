@@ -163,6 +163,10 @@ class TailoredResumeSchema(BaseModel):
     screener_answers: dict[str, str] = Field(default_factory=dict)
     keywords_covered: list[str] = Field(default_factory=list)
     keywords_missing: list[str] = Field(default_factory=list)
+    #: Skills the model claimed that the profile does not support. Removed
+    #: before the resume was rendered, and reported so the fabrication is
+    #: visible rather than silently corrected.
+    removed_unsupported: list[str] = Field(default_factory=list)
 
     @field_validator("screener_answers", mode="before")
     @classmethod
