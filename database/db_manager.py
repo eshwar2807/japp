@@ -1301,3 +1301,37 @@ class DBManager:
         from config import settings as _settings
 
         return float(_settings.AUTO_APPLY_THRESHOLD) or None
+
+    def submitted_today(self, user_id: int) -> int:
+        """Applications actually sent to an employer since midnight UTC.
+
+        Distinct from `applications_today`, which counts tailored drafts. The
+        daily cap governs tailoring, because that is what costs money; this is
+        what the user means by "applications".
+        """
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            return int(
+                sess.scalar(
+                    select(func.count(Application.id)).where(
+                        Application.user_id == user_id,
+                        Application.submitted_at.is_not(None),
+                        Application.submitted_at >= start,
+                    )
+                )
+                or 0
+            )
+
+    def awaiting_agent(self, user_id: int) -> int:
+        """Applications tailored and queued, waiting for the local agent."""
+        with self.session() as sess:
+            return int(
+                sess.scalar(
+                    select(func.count(RunJob.id)).where(
+                        RunJob.user_id == user_id,
+                        RunJob.kind == "apply",
+                        RunJob.status.in_((JobStatus.QUEUED, JobStatus.READY)),
+                    )
+                )
+                or 0
+            )

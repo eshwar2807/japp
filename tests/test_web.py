@@ -1042,3 +1042,60 @@ def test_earliest_start_date_is_still_required(web):
     profile = _ready_profile()
     profile["legal"]["earliest_start_date"] = ""
     assert completeness(profile)["ready"] is False
+
+
+# ---------------- tailored vs submitted ----------------
+
+
+def test_tailored_and_submitted_are_counted_separately(web):
+    """"Applications today: 8/20" read as eight applications sent, when all
+    eight were unsent drafts. The cap governs tailoring; submitted is what a
+    user means by an application."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+
+    for i in range(3):
+        web.db.create_application(company=f"Co{i}", role_title="Engineer",
+                                  job_url=f"https://x.com/{i}", user_id=user.id)
+    assert web.db.applications_today(user.id) == 3
+    assert web.db.submitted_today(user.id) == 0
+
+    app = web.db.list_applications(user_id=user.id)[0]
+    web.db.mark_submitted(app.id)
+    assert web.db.submitted_today(user.id) == 1
+    assert web.db.applications_today(user.id) == 3
+
+
+def test_awaiting_agent_counts_queued_apply_jobs(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    app = web.db.create_application(company="Co", role_title="Engineer",
+                                    job_url="https://x.com/1", user_id=user.id)
+
+    assert web.db.awaiting_agent(user.id) == 0
+    web.db.enqueue_job(user.id, kind="apply", job_url="https://x.com/1",
+                       application_id=app.id)
+    assert web.db.awaiting_agent(user.id) == 1
+
+    # A tailor job is not something the agent runs.
+    web.db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/2")
+    assert web.db.awaiting_agent(user.id) == 1
+
+
+def test_the_dashboard_says_nothing_is_sent_until_the_agent_runs(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    app = web.db.create_application(company="Branch", role_title="Senior Engineer",
+                                    job_url="https://x.com/1", match_score=90.0,
+                                    user_id=user.id)
+    web.db.enqueue_job(user.id, kind="apply", job_url="https://x.com/1",
+                       application_id=app.id)
+
+    page = web.get("/").text
+    assert "waiting to be sent" in page
+    assert "python -m agent" in page
+
+    discover = web.get("/discover").text
+    assert "Tailored today" in discover
+    assert "Submitted today" in discover

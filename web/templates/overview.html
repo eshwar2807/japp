@@ -6,6 +6,15 @@
   <a class="btn" href="/applications">New application</a>
 </div>
 
+{% if awaiting_agent %}
+<div class="card card-warn">
+  <h2>{{ awaiting_agent }} application(s) waiting to be sent</h2>
+  <p class="sub">Tailored and queued, but nothing is submitted until you run the
+    agent on your own machine &mdash; the browser has to be somewhere you can see it.</p>
+  <p class="secret mt-3">python -m agent --server https://japp.fly.dev --key-file ~/.japp-key</p>
+</div>
+{% endif %}
+
 {% if not readiness.ready or not has_api_key %}
 <div class="card card-warn">
   <h2>Finish setting up</h2>
@@ -27,8 +36,9 @@
 {% endif %}
 
 <div class="grid grid-4 mb-6">
-  <div class="stat"><div class="value">{{ stats.total }}</div><div class="label">Applications</div>
-    <div class="note">{{ stats.submitted }} submitted</div></div>
+  <div class="stat"><div class="value">{{ stats.submitted }}</div>
+    <div class="label">Submitted</div>
+    <div class="note">{{ stats.total }} tailored in total</div></div>
   <div class="stat"><div class="value">{{ stats.response_rate }}%</div><div class="label">Response rate</div>
     <div class="note">{{ stats.positive_outcomes }} positive</div></div>
   <div class="stat"><div class="value">{{ stats.avg_match_score }}%</div><div class="label">Avg ATS match</div>

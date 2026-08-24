@@ -8,19 +8,30 @@
 </div>
 
 <div class="grid grid-4 mb-6">
-  <div class="stat"><div class="value">{{ applications_today }}/{{ daily_cap }}</div>
-    <div class="label">Applications today</div>
-    <div class="note">discovery stops at the cap</div></div>
+  <div class="stat"><div class="value">{{ tailored_today }}/{{ daily_cap }}</div>
+    <div class="label">Tailored today</div>
+    <div class="note">the cap limits tailoring, which is what costs money</div></div>
+  <div class="stat"><div class="value">{{ submitted_today }}</div>
+    <div class="label">Submitted today</div>
+    <div class="note">
+      {% if awaiting_agent %}{{ awaiting_agent }} waiting for the agent
+      {% else %}nothing queued to send{% endif %}</div></div>
   <div class="stat"><div class="value">{{ spend_today|money }}</div>
     <div class="label">Spend today</div>
     <div class="note">cap {{ spend_cap|money }}</div></div>
   <div class="stat"><div class="value fs-lg mono">{{ bulk_model }}</div>
     <div class="label">Tailoring model</div>
-    <div class="note">bulk tier</div></div>
-  <div class="stat"><div class="value fs-lg mono">{{ discovery_model }}</div>
-    <div class="label">Search model</div>
-    <div class="note">needs web search</div></div>
+    <div class="note">search uses {{ discovery_model }}</div></div>
 </div>
+
+{% if awaiting_agent %}
+<div class="card card-warn">
+  <h2>{{ awaiting_agent }} application(s) tailored and waiting to be sent</h2>
+  <p class="sub">Nothing has been submitted yet. Tailoring runs here; the browser
+    runs on your machine, so an application is only sent once you start the agent:</p>
+  <p class="secret mt-3">python -m agent --server https://japp.fly.dev --key-file ~/.japp-key</p>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>What are you looking for?</h2>
