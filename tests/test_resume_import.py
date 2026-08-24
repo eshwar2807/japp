@@ -140,20 +140,89 @@ def test_docx_extraction_reads_paragraphs_and_tables():
 # ---------------- structured extraction ----------------
 
 
-def test_importer_sends_the_resume_and_asks_for_transcription():
-    sent = {}
+class SectionRecorder:
+    """Answers each of the three extraction passes by schema."""
 
-    class Recorder:
-        def parse(self, **kwargs):
-            sent.update(kwargs)
-            return SimpleNamespace(parsed_output=ImportedProfile(full_name="Ada Lovelace"),
-                                   stop_reason="end_turn")
+    def __init__(self):
+        self.calls = []
 
-    result = ResumeImporter(client=Recorder()).parse(RESUME_TEXT)
+    def parse(self, **kwargs):
+        from engine.resume_import import (
+            ImportedBasics,
+            ImportedCredentials,
+            ImportedExperience,
+            ImportedHistory,
+        )
+
+        self.calls.append(kwargs)
+        schema = kwargs["output_format"]
+        if schema is ImportedBasics:
+            parsed = ImportedBasics(full_name="Ada Lovelace", email="ada@example.com",
+                                    skills_tooling=["Go", "Kubernetes"])
+        elif schema is ImportedHistory:
+            parsed = ImportedHistory(experience=[ImportedExperience(
+                company="Analytical Engines", title="Principal Backend Engineer",
+                start_date="2021-03", is_current=True,
+                bullets=["Cut p99 API latency from 840ms to 210ms."])])
+        else:
+            parsed = ImportedCredentials()
+        return SimpleNamespace(parsed_output=parsed, stop_reason="end_turn")
+
+
+def test_importer_reads_the_resume_in_three_focused_passes():
+    """One schema for the whole resume was rejected as too complex."""
+    from engine.resume_import import ImportedBasics, ImportedCredentials, ImportedHistory
+
+    recorder = SectionRecorder()
+    result = ResumeImporter(client=recorder).parse(RESUME_TEXT)
+
+    schemas = [call["output_format"] for call in recorder.calls]
+    assert schemas == [ImportedBasics, ImportedHistory, ImportedCredentials]
+    assert all("Analytical Engines" in c["messages"][0]["content"] for c in recorder.calls)
+    assert all("transcrib" in c["system"].lower() for c in recorder.calls)
+
+    # The three passes assemble into one profile.
     assert result.full_name == "Ada Lovelace"
-    assert "Analytical Engines" in sent["messages"][0]["content"]
-    assert "transcrib" in sent["system"].lower()
-    assert sent["output_format"] is ImportedProfile
+    assert result.skills_tooling == ["Go", "Kubernetes"]
+    assert result.experience[0].company == "Analytical Engines"
+
+
+def test_every_extraction_schema_stays_under_the_complexity_limit():
+    """Regression: a combined schema returned 400 'Schema is too complex.'
+    Each pass is kept smaller than a schema known to be accepted."""
+    import json
+
+    from engine.resume_import import ImportedBasics, ImportedCredentials, ImportedHistory
+    from engine.schemas import TailoredResumeDraft
+
+    def size(model):
+        schema = model.model_json_schema()
+        properties = len(schema.get("properties", {}))
+        properties += sum(len(d.get("properties", {}))
+                          for d in schema.get("$defs", {}).values())
+        return len(json.dumps(schema)), properties
+
+    known_good_chars, known_good_props = size(TailoredResumeDraft)
+    for model in (ImportedBasics, ImportedHistory, ImportedCredentials):
+        chars, properties = size(model)
+        assert chars < known_good_chars, f"{model.__name__} schema is too large"
+        assert properties <= known_good_props, f"{model.__name__} has too many properties"
+
+
+def test_a_failing_section_does_not_lose_the_others():
+    """Employment history failing must not cost you your contact details."""
+    from engine.resume_import import ImportedBasics, ImportedHistory
+
+    class PartlyBroken(SectionRecorder):
+        def parse(self, **kwargs):
+            if kwargs["output_format"] is ImportedHistory:
+                raise RuntimeError("section failed")
+            return super().parse(**kwargs)
+
+    result = ResumeImporter(client=PartlyBroken()).parse(RESUME_TEXT)
+    assert result.full_name == "Ada Lovelace"
+    assert result.experience == []
+    assert any("No employment history" in note for note in result.uncertain)
 
 
 def test_importer_uses_the_cheap_tier():

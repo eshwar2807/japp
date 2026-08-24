@@ -86,9 +86,22 @@ def test_an_unknown_model_is_treated_conservatively():
 
 
 def test_resume_import_on_the_bulk_tier_sends_no_adaptive_thinking():
-    from engine.resume_import import ImportedProfile, ResumeImporter
+    from engine.resume_import import (
+        ImportedBasics,
+        ImportedCredentials,
+        ImportedHistory,
+        ResumeImporter,
+    )
 
-    recorder = Recorder(ImportedProfile(full_name="Ada"))
+    class BySchema(Recorder):
+        def parse(self, **kwargs):
+            schema = kwargs["output_format"]
+            self.parsed = {ImportedBasics: ImportedBasics(full_name="Ada"),
+                           ImportedHistory: ImportedHistory(),
+                           ImportedCredentials: ImportedCredentials()}[schema]
+            return super().parse(**kwargs)
+
+    recorder = BySchema(None)
     ResumeImporter(client=recorder, model=BULK).parse("x" * 400)
 
     assert "thinking" not in recorder.kwargs

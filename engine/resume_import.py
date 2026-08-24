@@ -136,11 +136,10 @@ class ImportedExperience(BaseModel):
     company: str
     title: str
     location: str = ""
-    start_date: str = Field(default="", description="YYYY-MM as printed on the resume.")
-    end_date: str = Field(default="", description="YYYY-MM, or empty if current.")
+    start_date: str = Field(default="", description="YYYY-MM as printed.")
+    end_date: str = Field(default="", description="YYYY-MM, empty if current.")
     is_current: bool = False
     bullets: list[str] = Field(default_factory=list)
-    tech_used: list[str] = Field(default_factory=list)
 
 
 class ImportedEducation(BaseModel):
@@ -149,7 +148,6 @@ class ImportedEducation(BaseModel):
     institution: str
     degree: str = ""
     field_of_study: str = ""
-    location: str = ""
     end_date: str = ""
 
 
@@ -161,8 +159,64 @@ class ImportedCertification(BaseModel):
     issue_date: str = ""
 
 
+# --------------------------------------------------------------------------
+# Three narrow schemas, one per call
+# --------------------------------------------------------------------------
+#
+# A single schema covering the whole resume was rejected outright:
+#
+#     400 invalid_request_error: Schema is too complex.
+#
+# Structured outputs caps schema complexity, and a full profile - contact,
+# skills, employment, education, certifications - exceeded it. Each section is
+# now its own call with its own small schema. That also gives each call a
+# narrower instruction, which extracts more accurately than one prompt trying
+# to do everything.
+
+
+class ImportedBasics(BaseModel):
+    """Contact details, summary and skills. Flat: no nested models."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    city: str = ""
+    state: str = ""
+    country: str = ""
+    linkedin: str = ""
+    github: str = ""
+    portfolio: str = ""
+    summary: str = Field(default="", description="The resume's own summary, or empty.")
+    target_titles: list[str] = Field(default_factory=list)
+    skills_hard: list[str] = Field(default_factory=list)
+    skills_tooling: list[str] = Field(default_factory=list)
+    skills_soft: list[str] = Field(default_factory=list)
+
+
+class ImportedHistory(BaseModel):
+    """Employment history."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    experience: list[ImportedExperience] = Field(default_factory=list)
+    uncertain: list[str] = Field(
+        default_factory=list, description="Anything ambiguous, for a human to check."
+    )
+
+
+class ImportedCredentials(BaseModel):
+    """Education and certifications."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    education: list[ImportedEducation] = Field(default_factory=list)
+    certifications: list[ImportedCertification] = Field(default_factory=list)
+
+
 class ImportedProfile(BaseModel):
-    """What can honestly be read off a resume. No legal or EEO fields."""
+    """The assembled result. Never sent to the API - built from the three above."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -183,10 +237,7 @@ class ImportedProfile(BaseModel):
     experience: list[ImportedExperience] = Field(default_factory=list)
     education: list[ImportedEducation] = Field(default_factory=list)
     certifications: list[ImportedCertification] = Field(default_factory=list)
-    uncertain: list[str] = Field(
-        default_factory=list,
-        description="Anything ambiguous or hard to read, so it can be checked.",
-    )
+    uncertain: list[str] = Field(default_factory=list)
 
 
 IMPORT_SYSTEM = """\
@@ -198,21 +249,39 @@ Rules:
 - Never invent an employer, title, date, degree, certification, metric or tool. \
 If the resume does not say it, leave the field empty.
 - Dates: normalise to YYYY-MM. "Jan 2021" -> "2021-01". A year alone -> \
-"YYYY-01", and note it in `uncertain`. "Present"/"Current" -> is_current true \
-and end_date empty.
-- Bullets: copy each accomplishment as written, minus the bullet character. \
-Keep every metric exactly as printed.
-- Classify skills: `skills_hard` for competencies (e.g. "distributed systems"), \
-`skills_tooling` for named products and languages (e.g. "Kubernetes", "Go"), \
-`skills_soft` for interpersonal ones. Only skills the resume actually lists.
+"YYYY-01".
+- Do not attempt work authorisation, sponsorship, clearance, salary or \
+demographic fields. They are not on a resume and are handled elsewhere."""
+
+BASICS_INSTRUCTION = """\
+This pass: contact details, professional summary and skills only.
+
+- Classify skills: `skills_hard` for competencies ("distributed systems"), \
+`skills_tooling` for named products and languages ("Kubernetes", "Go"), \
+`skills_soft` for interpersonal ones. Only what the resume lists.
 - `summary` is the resume's own summary if it has one, otherwise empty. Do not \
 compose one.
 - `target_titles`: roles this person has held or is clearly aiming at.
-- PDF text extraction garbles things. Anything you had to guess at - a run-on \
-date, a merged column, an unclear employer boundary - goes in `uncertain` so a \
-human checks it.
-- Do not attempt work authorisation, sponsorship, clearance, salary or \
-demographic fields. They are not on a resume and are handled elsewhere."""
+- Ignore employment history, education and certifications."""
+
+HISTORY_INSTRUCTION = """\
+This pass: employment history only.
+
+- One entry per role, most recent first.
+- Copy each bullet as written, minus the bullet character, keeping every metric \
+exactly as printed.
+- "Present"/"Current" -> is_current true, end_date empty.
+- Put anything you had to guess at - a run-on date, a merged column, an unclear \
+employer boundary - in `uncertain`.
+- Ignore contact details, skills, education and certifications."""
+
+CREDENTIALS_INSTRUCTION = """\
+This pass: education and certifications only.
+
+- Degrees, institutions and fields of study exactly as printed.
+- A certification is a named credential from an issuing body, not a course or a \
+skill.
+- Ignore contact details, skills and employment history."""
 
 
 class ResumeImporter:
@@ -233,28 +302,67 @@ class ResumeImporter:
             self._client = anthropic.Anthropic(**({"api_key": key} if key else {})).messages
         return self._client
 
-    def parse(self, text: str) -> ImportedProfile:
+    def _section(self, text: str, instruction: str, schema: type, phase: str) -> Any:
         from engine.llm import request_params
 
         response = self.client.parse(
             model=self.model,
             max_tokens=settings.LLM_MAX_TOKENS,
-            system=IMPORT_SYSTEM,
+            system=IMPORT_SYSTEM + "\n\n" + instruction,
             messages=[{"role": "user", "content":
-                       "<RESUME>\n" + text + "\n</RESUME>\n\nTranscribe it."}],
-            output_format=ImportedProfile,
+                       "<RESUME>\n" + text + "\n</RESUME>"}],
+            output_format=schema,
             **request_params(self.model),
         )
         if self.on_usage is not None:
             try:
-                self.on_usage("resume_import", response)
+                self.on_usage(phase, response)
             except Exception:
                 log.exception("Usage callback failed during resume import")
+        return getattr(response, "parsed_output", None)
 
-        parsed = getattr(response, "parsed_output", None)
-        if parsed is None:
-            raise ResumeImportError("Could not extract a profile from that resume.")
-        return parsed
+    def parse(self, text: str) -> ImportedProfile:
+        """Read the resume in three passes and assemble one profile.
+
+        The passes are independent: if education fails to parse, the contact
+        details and employment history still come through, and the missing
+        section is simply left for the user to fill in.
+        """
+        basics = self._section(text, BASICS_INSTRUCTION, ImportedBasics,
+                               "resume_import_basics")
+        if basics is None:
+            raise ResumeImportError("Could not read anything from that resume.")
+
+        history, credentials = None, None
+        for instruction, schema, phase, target in (
+            (HISTORY_INSTRUCTION, ImportedHistory, "resume_import_history", "history"),
+            (CREDENTIALS_INSTRUCTION, ImportedCredentials, "resume_import_credentials",
+             "credentials"),
+        ):
+            try:
+                result = self._section(text, instruction, schema, phase)
+            except Exception:
+                log.exception("Resume section %s failed; continuing", target)
+                result = None
+            if target == "history":
+                history = result
+            else:
+                credentials = result
+
+        history = history or ImportedHistory()
+        credentials = credentials or ImportedCredentials()
+
+        notes = list(history.uncertain)
+        if history is not None and not history.experience:
+            notes.append("No employment history was read - add your roles below.")
+
+        return ImportedProfile(
+            **basics.model_dump(),
+            experience=history.experience,
+            education=credentials.education,
+            certifications=credentials.certifications,
+            uncertain=notes,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -304,13 +412,16 @@ def to_profile(imported: ImportedProfile, existing: dict | None = None) -> dict:
             "start_date": e.start_date,
             "end_date": None if e.is_current else (e.end_date or None),
             "is_current": e.is_current, "employment_type": "Full-time",
-            "bullets": e.bullets, "tech_used": e.tech_used,
+            # Per-role technology lists are not extracted: they cost schema
+            # complexity for something the global skills list already covers,
+            # and the user can add them per role if they want to.
+            "bullets": e.bullets, "tech_used": [],
         } for e in imported.experience]
 
     if not profile.get("education"):
         profile["education"] = [{
             "institution": e.institution, "degree": e.degree,
-            "field_of_study": e.field_of_study, "location": e.location,
+            "field_of_study": e.field_of_study, "location": "",
             "start_date": "", "end_date": e.end_date, "gpa": None,
         } for e in imported.education]
 

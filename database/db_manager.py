@@ -1227,9 +1227,13 @@ class DBManager:
         for user in self.list_users(limit=1000):
             if (user.notify_mode or "immediate") != "digest" or not user.is_active:
                 continue
-            offset = timedelta(minutes=int(user.notify_utc_offset_minutes or 0))
+            offset_minutes = user.notify_utc_offset_minutes
+            offset = timedelta(minutes=int(offset_minutes if offset_minutes is not None else 0))
             local_now = now + offset
-            if local_now.hour < int(user.notify_digest_hour or 18):
+            # `or 18` would be wrong here: hour 0 is falsy, so anyone choosing
+            # midnight would silently be given 18:00 instead.
+            hour = user.notify_digest_hour
+            if local_now.hour < int(hour if hour is not None else 18):
                 continue
             if user.last_digest_at is not None:
                 last = user.last_digest_at

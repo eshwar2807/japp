@@ -255,9 +255,20 @@ def test_per_user_model_overrides_apply(db, user):
 # ---------------- digest ----------------
 
 
-def _digest_user(db, hour=0, offset=0):
+def _digest_user(db, due=True):
+    """A digest user whose local time is deliberately past (or before) its hour.
+
+    Anchored to the current UTC hour rather than a fixed one, so these tests do
+    not pass or fail depending on the time of day.
+    """
+    from datetime import datetime, timezone
+
     user = db.create_user("digest@example.com", "$argon2id$fake")
-    db.update_user(user.id, notify_mode="digest", notify_digest_hour=hour,
+    utc_hour = datetime.now(timezone.utc).hour
+    # Shift local time to 12:00, then set the hour either side of it.
+    offset = (12 - utc_hour) * 60
+    db.update_user(user.id, notify_mode="digest",
+                   notify_digest_hour=9 if due else 20,
                    notify_utc_offset_minutes=offset)
     return db.get_user(user.id)
 
@@ -265,7 +276,7 @@ def _digest_user(db, hour=0, offset=0):
 def test_digest_is_due_only_when_something_is_blocked(db):
     from database.models import ActionKind
 
-    user = _digest_user(db, hour=0)
+    user = _digest_user(db)
     assert db.users_due_for_digest() == []          # nothing to report
 
     db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
@@ -275,7 +286,7 @@ def test_digest_is_due_only_when_something_is_blocked(db):
 def test_digest_is_not_due_before_the_chosen_hour(db):
     from database.models import ActionKind
 
-    user = _digest_user(db, hour=23, offset=-23 * 60)
+    user = _digest_user(db, due=False)
     db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
     assert db.users_due_for_digest() == []
 
@@ -283,7 +294,7 @@ def test_digest_is_not_due_before_the_chosen_hour(db):
 def test_digest_is_sent_once_per_day(db):
     from database.models import ActionKind
 
-    user = _digest_user(db, hour=0)
+    user = _digest_user(db)
     db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
     assert db.users_due_for_digest() == [(user.id, 1)]
 
@@ -314,7 +325,7 @@ def test_digest_mode_suppresses_per_block_alerts(db):
             self.sent.append(notice)
 
     channel = Recorder()
-    user = _digest_user(db, hour=0)
+    user = _digest_user(db)
     job = db.enqueue_job(user.id, job_url="https://x.com/1")
 
     keeper = QueueGatekeeper(db, user.id, job.id, ParkRegistry(),
@@ -475,3 +486,37 @@ def test_capped_set_is_cached_between_dispatcher_ticks(db, monkeypatch):
         worker._capped_users()
 
     assert calls["n"] == 1, "the ceiling must be recomputed on a timer, not per tick"
+
+
+def test_midnight_is_a_valid_digest_hour(db):
+    """Regression: `hour or 18` treated 0 as unset, so anyone choosing
+    midnight silently got 18:00. Only visible between 00:00 and 18:00 UTC."""
+    from datetime import datetime, timezone
+
+    from database.models import ActionKind
+
+    user = db.create_user("midnight@example.com", "$argon2id$fake")
+    # Offset chosen so the user's local hour is exactly their digest hour.
+    local_hour = datetime.now(timezone.utc).hour
+    db.update_user(user.id, notify_mode="digest", notify_digest_hour=0,
+                   notify_utc_offset_minutes=-local_hour * 60)
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+
+    assert db.users_due_for_digest() == [(user.id, 1)]
+
+
+def test_a_digest_hour_of_zero_is_not_confused_with_unset(db):
+    from database.models import ActionKind
+
+    user = db.create_user("late@example.com", "$argon2id$fake")
+    # Local time is 01:00, digest hour 0 -> due; digest hour 18 -> not due.
+    from datetime import datetime, timezone
+
+    offset = (1 - datetime.now(timezone.utc).hour) * 60
+    db.update_user(user.id, notify_mode="digest", notify_digest_hour=0,
+                   notify_utc_offset_minutes=offset)
+    db.create_action(user.id, ActionKind.UNMAPPED_FIELD, "Years of Go?")
+    assert db.users_due_for_digest() == [(user.id, 1)]
+
+    db.update_user(user.id, notify_digest_hour=18)
+    assert db.users_due_for_digest() == []
