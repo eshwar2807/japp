@@ -90,6 +90,8 @@ def run_one(client: DashboardClient, payload: dict) -> None:
         screener_answers=tailored.screener_answers,
         remembered=payload.get("known_answers") or {},
         resolver=resolver,
+        salary_min=application.get("salary_min"),
+        salary_max=application.get("salary_max"),
     )
 
     with tempfile.TemporaryDirectory(prefix="jp_agent_") as tmp:

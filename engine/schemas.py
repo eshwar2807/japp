@@ -44,6 +44,14 @@ class JDKeywords(BaseModel):
     required_years_experience: float | None = Field(
         default=None, description="Minimum years stated, null if unstated."
     )
+    salary_min: float | None = Field(
+        default=None,
+        description="Lower bound of any stated salary range, as a yearly number "
+        "in the posting's currency. Null if the posting states none.",
+    )
+    salary_max: float | None = Field(
+        default=None, description="Upper bound of any stated salary range. Null if unstated."
+    )
     education_requirement: str = Field(default="")
     screener_questions: list[str] = Field(
         default_factory=list,

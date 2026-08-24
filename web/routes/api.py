@@ -283,6 +283,8 @@ def agent_claim(user: APIUser, db: Database):
             "company": application.company,
             "role_title": application.role_title,
             "job_url": application.job_url,
+            "salary_min": application.salary_min,
+            "salary_max": application.salary_max,
         },
         "profile": profile,
         "tailored": tailored,

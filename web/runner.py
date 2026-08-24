@@ -137,6 +137,8 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         resume_pdf_path=str(pdf_path),
         match_score=resume.ats_match_percentage,
         tailored_payload=resume.model_dump(),
+        salary_min=keywords.salary_min,
+        salary_max=keywords.salary_max,
         user_id=user_id,
     )
     application_ref[0] = application.id
@@ -205,6 +207,8 @@ def run_apply_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         screener_answers=resume.screener_answers,
         remembered=db.answered_action_map(user_id),
         resolver=resolver,
+        salary_min=application.salary_min,
+        salary_max=application.salary_max,
     )
 
     driver_class = get_driver_class(application.job_url)

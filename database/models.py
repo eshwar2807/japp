@@ -89,6 +89,10 @@ class Application(Base):
     tailored_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     match_score: Mapped[float] = mapped_column(Float, default=0.0)
+    #: Salary range the posting stated, if any. Used to answer "desired salary"
+    #: per posting rather than with one static number.
+    salary_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[ApplicationStatus] = mapped_column(
         SAEnum(ApplicationStatus, values_callable=lambda e: [m.value for m in e]),
         default=ApplicationStatus.DRAFT,

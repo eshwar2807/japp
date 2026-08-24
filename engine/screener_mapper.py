@@ -306,15 +306,36 @@ class ScreenerMapper:
         screener_answers: dict[str, str] | None = None,
         remembered: dict[str, str] | None = None,
         resolver: Any | None = None,
+        salary_min: float | None = None,
+        salary_max: float | None = None,
+        salary_fallback: int | None = None,
     ) -> None:
         self.profile = profile
         self.screener_answers = screener_answers or {}
+        #: The range this posting states, so "desired salary" can be answered
+        #: per posting instead of with one static number.
+        self.salary_min = salary_min
+        self.salary_max = salary_max
+        self.salary_fallback = salary_fallback
         #: Answers the user gave to earlier applications, reused verbatim.
         self.remembered = remembered or {}
         #: Optional LLM fallback, tried once per form before escalating.
         self.resolver = resolver
 
     # ---------------- resolution ----------------
+
+    def _resolve_salary(self, question: str) -> tuple[str, str] | None:
+        """Answer a salary question from the posting, the profile, or the default."""
+        if not wants_salary(question):
+            return None
+        fallback = self.salary_fallback
+        if fallback is None:
+            configured = (self.profile.preferences or {}).get("desired_salary_fallback")
+            fallback = int(configured) if configured else DEFAULT_SALARY_FALLBACK
+        return salary_for_posting(
+            self.salary_min, self.salary_max,
+            self.profile.legal.get("desired_salary", ""), fallback,
+        )
 
     def _from_rules(self, question: str) -> tuple[str, str] | None:
         """Return (value, rule_name) for the first matching rule."""
@@ -368,6 +389,18 @@ class ScreenerMapper:
             return MappedAnswer(
                 question="", source=AnswerSource.UNMAPPED, reason="Field has no label or name."
             )
+
+        # Salary is resolved before the rule table: the posted range is a
+        # better answer than a fixed profile figure, and the table would
+        # otherwise return the profile value for every posting alike.
+        salary = self._resolve_salary(question)
+        if salary:
+            value, reason = salary
+            answer = MappedAnswer(
+                question=question, value=value, source=AnswerSource.RULE,
+                confidence=1.0, reason=f"desired salary: {reason}",
+            )
+            return self._match_option(answer, field) if field.options else answer
 
         rule = self._from_rules(question)
         if rule:
@@ -503,3 +536,57 @@ class ScreenerMapper:
                 inferred = self._match_option(inferred, field)
             out.append((field, inferred))
         return out
+
+
+# --------------------------------------------------------------------------
+# Salary
+# --------------------------------------------------------------------------
+
+#: Used when a posting states no range and the profile names no figure.
+DEFAULT_SALARY_FALLBACK = 150_000
+
+_SALARY_QUESTION = re.compile(
+    r"(salary|compensation|pay|remuneration)\s*(expectation|requirement|desired|"
+    r"range|target)?|desired\s+(salary|pay|compensation)|expected\s+(salary|"
+    r"compensation|pay)|what.{0,20}salary",
+    re.IGNORECASE,
+)
+
+
+def wants_salary(question: str) -> bool:
+    return bool(_SALARY_QUESTION.search(question or ""))
+
+
+def salary_for_posting(
+    salary_min: float | None,
+    salary_max: float | None,
+    profile_value: str = "",
+    fallback: int = DEFAULT_SALARY_FALLBACK,
+) -> tuple[str, str]:
+    """Answer "desired salary" for one posting. Returns (value, reason).
+
+    Preference order:
+      1. Midpoint of the range the posting itself states. Asking for the middle
+         of a published band is the answer least likely to price you out or
+         leave money on the table.
+      2. A figure set in the profile.
+      3. The configured fallback.
+    """
+    if salary_min and salary_max:
+        # A transposed pair has the same midpoint either way, so normalise
+        # rather than discard: the posting's real numbers beat a default.
+        low, high = sorted((salary_min, salary_max))
+        midpoint = int(round((low + high) / 2))
+        return str(midpoint), f"midpoint of the posted range {int(low):,}-{int(high):,}"
+    if salary_min or salary_max:
+        single = int(salary_min or salary_max)
+        return str(single), "the single figure the posting states"
+
+    cleaned = re.sub(r"[^0-9.]", "", str(profile_value or ""))
+    if cleaned:
+        try:
+            return str(int(float(cleaned))), "your profile figure"
+        except ValueError:
+            pass
+
+    return str(fallback), "your default, as the posting states no range"
