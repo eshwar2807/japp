@@ -40,7 +40,7 @@
     {% if api_key_prefix %}
     <div class="field mt-4"><label>Active key</label>
       <div class="secret">{{ api_key_prefix }}…</div>
-      <p class="hint">Created {{ api_key_created.strftime('%b %d, %Y') if api_key_created else '—' }}</p></div>
+      <p class="hint">Created {{ api_key_created|full if api_key_created else '—' }}</p></div>
     {% else %}
     <p class="hint mt-4">No API key yet.</p>
     {% endif %}
@@ -57,6 +57,23 @@
       {% endif %}
     </div>
   </div>
+</div>
+
+<div class="card">
+  <h2>Display timezone</h2>
+  <p class="sub">Everything is stored in UTC and shown in your zone. Currently
+    <strong>{{ tz_name }}</strong> ({{ tz_abbr }}).</p>
+  <form method="post" action="/settings/timezone" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field"><label for="timezone_name">Timezone</label>
+      <select id="timezone_name" name="timezone_name">
+        {% for value, label in common_zones %}
+        <option value="{{ value }}" {{ 'selected' if value == tz_name }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Any IANA zone name works if yours is not listed.</p></div>
+    <button type="submit">Save timezone</button>
+  </form>
 </div>
 
 <div class="card">
@@ -133,7 +150,7 @@
     <tr><th>When</th><th>Channel</th><th>Title</th><th>Result</th></tr>
     {% for note in notifications %}
     <tr>
-      <td class="muted">{{ note.created_at.strftime('%b %d %H:%M') }}</td>
+      <td class="muted">{{ note.created_at|when }}</td>
       <td class="mono">{{ note.channel }}</td>
       <td>{{ note.title }}</td>
       <td>{% if note.delivered %}<span class="pill pill-good">sent</span>
@@ -165,7 +182,7 @@
         </form>
         {% endif %}
       </td>
-      <td class="muted">{{ cred.created_at.strftime('%b %d, %Y') }}</td>
+      <td class="muted">{{ cred.created_at|full }}</td>
     </tr>
     {% endfor %}
   </table></div>

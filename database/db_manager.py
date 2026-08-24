@@ -1335,3 +1335,19 @@ class DBManager:
                 )
                 or 0
             )
+
+    def has_pending_apply_job(self, application_id: int) -> bool:
+        """Is there already an unfinished apply job for this application?
+
+        Guards against duplicates from three directions: a tailor job requeued
+        after a restart re-running its auto-queue step, a user pressing "Run
+        application" twice, and an API caller retrying.
+        """
+        with self.session() as sess:
+            return sess.scalars(
+                select(RunJob).where(
+                    RunJob.application_id == application_id,
+                    RunJob.kind == "apply",
+                    RunJob.status.not_in(TERMINAL_JOB_STATUSES),
+                ).limit(1)
+            ).first() is not None

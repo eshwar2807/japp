@@ -126,6 +126,9 @@ GENERATED_PASSWORD_LENGTH = int(os.getenv("JP_PASSWORD_LENGTH", "16"))
 SECRET_KEY = os.getenv("JP_SECRET_KEY")
 SECRET_KEY_PATH = Path(os.getenv("JP_SECRET_KEY_PATH", DATA_DIR / "secret.key"))
 
+# Zone new accounts display timestamps in.
+DEFAULT_TIMEZONE = os.getenv("JP_DEFAULT_TIMEZONE", "UTC")
+
 WEB_HOST = os.getenv("JP_WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("JP_WEB_PORT", "8000"))
 # Cookies are Secure by default; set JP_INSECURE_COOKIES=true only for local

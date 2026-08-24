@@ -237,6 +237,10 @@ class User(Base):
     notify_mode: Mapped[str] = mapped_column(String(16), default="immediate")
     notify_digest_hour: Mapped[int] = mapped_column(Integer, default=18)
     notify_utc_offset_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    #: IANA zone used to render every timestamp in the dashboard. Stored rather
+    #: than inferred, because a server in Chicago showing UTC to a user in
+    #: California makes the log unreadable.
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     last_digest_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -100,7 +100,7 @@
     {% for job in recent %}
     <tr>
       <td class="mono">{{ job.id }}</td>
-      <td class="muted">{{ job.created_at.strftime('%b %d %H:%M') }}</td>
+      <td class="muted">{{ job.created_at|when }}</td>
       <td>{% if job.status.value == 'Done' %}<span class="pill pill-good">Done</span>
           {% elif job.status.value == 'Running' %}<span class="pill pill-warn">Running</span>
           {% else %}<span class="pill pill-mute">{{ job.status.value }}</span>{% endif %}</td>

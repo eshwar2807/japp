@@ -41,7 +41,7 @@
       <td>{{ app.role_title }}</td>
       <td><span class="pill {{ 'pill-good' if app.match_score >= 80 else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
       <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
-      <td class="muted">{{ app.created_at.strftime('%b %d') }}</td>
+      <td class="muted">{{ app.created_at|day }}</td>
       <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>
     </tr>
     {% endfor %}

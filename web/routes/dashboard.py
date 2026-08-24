@@ -38,8 +38,16 @@ MAX_BATCH = 25
 
 def render(request: Request, template: str, user, db, **context) -> HTMLResponse:
     from web.app import templates
+    from web.timefmt import abbreviation, make_filters
+
+    # Timestamps are stored in UTC and shown in the viewer's zone. Bound per
+    # request rather than globally, since two users need different answers.
+    zone = getattr(user, "timezone", None) or settings.DEFAULT_TIMEZONE
+    templates.env.filters.update(make_filters(zone))
 
     base = {
+        "tz_name": zone,
+        "tz_abbr": abbreviation(zone),
         "user": user,
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "open_actions": db.count_open_actions(user.id) if user else 0,
@@ -341,6 +349,8 @@ def run_apply(request: Request, user: CurrentUser, db: Database, app_id: int,
     app = db.get_application(app_id, user_id=user.id)
     if app is None:
         return _redirect("/applications", error="Application not found.")
+    if db.has_pending_apply_job(app_id):
+        return _redirect("/queue", ok="Already queued for the agent.")
     db.enqueue_job(user.id, kind="apply", job_url=app.job_url, application_id=app_id)
     return _redirect("/queue",
                      ok="Queued. Anything needing you will appear under Needs you.")
@@ -451,6 +461,12 @@ def queue_page(request: Request, user: CurrentUser, db: Database,
         max_held=_max_held(),
         ok=ok, error=error,
     )
+
+
+def _common_zones():
+    from web.timefmt import COMMON_ZONES
+
+    return COMMON_ZONES
 
 
 def _desktop_available() -> bool:
@@ -660,6 +676,7 @@ def settings_page(request: Request, user: CurrentUser, db: Database,
         notifications=db.list_notifications(user.id, limit=8),
         desktop_available=_desktop_available(),
         auto_apply_threshold=db.auto_apply_threshold(user.id),
+        common_zones=_common_zones(),
         spend_cap=db.daily_cap_for(user.id),
         spend_today=db.spend_today(user.id),
         api_key_created=user.api_key_created_at,
@@ -710,6 +727,19 @@ def save_anthropic_key(request: Request, user: CurrentUser, db: Database,
     db.log_event(user.id, "anthropic_key",
                  "API key stored (encrypted)" if key else "API key removed")
     return _redirect("/settings", ok="API key saved." if key else "API key removed.")
+
+
+@router.post("/settings/timezone")
+def save_timezone(request: Request, user: CurrentUser, db: Database,
+                  timezone_name: str = Form("UTC"), _csrf: None = CSRFProtected):
+    from web.timefmt import valid_zone
+
+    name = (timezone_name or "").strip()
+    if not valid_zone(name):
+        return _redirect("/settings", error=f"'{name}' is not a known timezone.")
+    db.update_user(user.id, timezone=name)
+    db.log_event(user.id, "timezone", f"Timestamps now shown in {name}")
+    return _redirect("/settings", ok=f"Times now shown in {name}.")
 
 
 @router.post("/settings/notifications")

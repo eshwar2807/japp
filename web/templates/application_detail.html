@@ -22,9 +22,9 @@
   <div class="stat"><div class="value">{{ app.match_score|round(1) }}%</div><div class="label">ATS match</div></div>
   <div class="stat"><div class="value fs-lg">{{ app.status.value }}</div><div class="label">Status</div></div>
   <div class="stat"><div class="value fs-lg">{{ app.portal_domain or '—' }}</div><div class="label">Portal</div></div>
-  <div class="stat"><div class="value fs-lg">{{ app.created_at.strftime('%b %d') }}</div>
+  <div class="stat"><div class="value fs-lg">{{ app.created_at|day }}</div>
     <div class="label">Created</div>
-    <div class="note">{{ app.submitted_at.strftime('%b %d') if app.submitted_at else 'not submitted' }}</div></div>
+    <div class="note">{{ app.submitted_at|day if app.submitted_at else 'not submitted' }}</div></div>
 </div>
 
 {% if actions %}
@@ -70,7 +70,7 @@
     <div class="field"><label>Username</label><div class="secret">{{ credential.username_email }}</div></div>
     <div class="field"><label>Password</label>
       <div class="secret">stored encrypted · <a href="/settings">reveal in Settings</a></div></div>
-    <p class="hint">Created {{ credential.created_at.strftime('%b %d, %Y') }}</p>
+    <p class="hint">Created {{ credential.created_at|full }}</p>
     {% else %}
     <p class="empty">No account stored for this portal — it either needed no login,
       or one has not been created yet.</p>
@@ -135,7 +135,7 @@
     {% if logs %}
     <div class="table-wrap scroll-box"><table class="log">
       {% for entry in logs %}
-      <tr><td class="w-time-sm">{{ entry.created_at.strftime('%m/%d %H:%M') }}</td>
+      <tr><td class="w-time-sm">{{ entry.created_at|when }}</td>
         <td class="lvl-{{ entry.level.value }}">{{ entry.event }}</td>
         <td>{{ entry.message[:140] }}</td></tr>
       {% endfor %}

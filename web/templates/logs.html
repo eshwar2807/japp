@@ -3,7 +3,8 @@
 {% block content %}
 <div class="page-head">
   <div><h1>Run logs</h1>
-    <p class="sub">Everything the pipeline did, kept for {{ retention_days }} days.</p></div>
+    <p class="sub">Everything the pipeline did, kept for {{ retention_days }} days.
+      Times shown in {{ tz_name }} ({{ tz_abbr }}).</p></div>
   <div class="actions-row">
     <a class="btn btn-ghost btn-sm" href="/logs">All</a>
     {% for level in levels %}
@@ -17,7 +18,7 @@
     <tr><th>Time</th><th>Level</th><th>Event</th><th>Message</th><th>App</th></tr>
     {% for entry in logs %}
     <tr>
-      <td class="w-time">{{ entry.created_at.strftime('%b %d %H:%M:%S') }}</td>
+      <td class="w-time">{{ entry.created_at|when_precise }}</td>
       <td class="lvl-{{ entry.level.value }}" class="w-lvl-wide">{{ entry.level.value }}</td>
       <td class="w-event">{{ entry.event }}</td>
       <td class="pre">{{ entry.message }}</td>

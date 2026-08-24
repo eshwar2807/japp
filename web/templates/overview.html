@@ -86,7 +86,7 @@
   {% if logs %}
   <div class="table-wrap"><table class="log">
     {% for entry in logs %}
-    <tr><td class="w-time">{{ entry.created_at.strftime('%b %d %H:%M') }}</td>
+    <tr><td class="w-time">{{ entry.created_at|when }}</td>
       <td class="lvl-{{ entry.level.value }}" class="w-lvl">{{ entry.level.value }}</td>
       <td>{{ entry.event }}</td><td>{{ entry.message[:110] }}</td></tr>
     {% endfor %}

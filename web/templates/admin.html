@@ -29,8 +29,8 @@
       <td class="mono">{{ row.id }}</td>
       <td>{{ row.email }}
         {% if row.is_admin %}<span class="pill pill-good">admin</span>{% endif %}</td>
-      <td class="muted">{{ row.created_at.strftime('%b %d, %Y') }}</td>
-      <td class="muted">{{ row.last_login_at.strftime('%b %d %H:%M') if row.last_login_at else 'never' }}</td>
+      <td class="muted">{{ row.created_at|full }}</td>
+      <td class="muted">{{ row.last_login_at|when if row.last_login_at else 'never' }}</td>
       <td>{{ row.profile_percent }}%</td>
       <td>{{ row.applications }}</td>
       <td>{{ row.llm_spend|money }}<div class="hint">{{ row.llm_calls }} calls</div></td>

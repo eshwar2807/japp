@@ -166,13 +166,15 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     )
     application_ref[0] = application.id
 
-    # Genuine gaps become queue items, but must not block the job: they are
-    # information about your profile, not a prerequisite for this application.
-    for missing in resume.keywords_missing[:10]:
-        db.create_action(
-            user_id=user_id, kind=ActionKind.UNMAPPED_FIELD,
-            question=f"The posting asks for '{missing}'. Do you have relevant experience?",
-            reason="Not found in your profile. Adding it lets future applications use it.",
+    # Gaps are NOT queue items. One item per missing keyword produced 171
+    # dismissible rows across eight applications - noise that buried the items
+    # that actually block a run. They are already listed on the application
+    # page and in the log below, which is where information belongs.
+    if resume.keywords_missing:
+        db.log_event(
+            user_id, "gaps",
+            "Requirements your profile does not cover: "
+            + ", ".join(resume.keywords_missing[:12]),
             application_id=application.id,
         )
 
@@ -185,15 +187,20 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     threshold = db.auto_apply_threshold(user_id)
     queued_apply = False
     if threshold is not None and resume.ats_match_percentage >= threshold:
-        db.enqueue_job(user_id, kind="apply", job_url=job.job_url,
-                       application_id=application.id, batch_id=job.batch_id)
-        queued_apply = True
-        db.log_event(
-            user_id, "auto_queued",
-            f"{resume.ats_match_percentage:.1f}% >= {threshold:.0f}% threshold; "
-            "queued for the agent. Submission still needs your approval.",
-            application_id=application.id,
-        )
+        # A tailor job requeued after a restart would otherwise queue a second
+        # apply job for an application that already has one.
+        if db.has_pending_apply_job(application.id):
+            log.info("Application %s already has a pending apply job", application.id)
+        else:
+            db.enqueue_job(user_id, kind="apply", job_url=job.job_url,
+                           application_id=application.id, batch_id=job.batch_id)
+            queued_apply = True
+            db.log_event(
+                user_id, "auto_queued",
+                f"{resume.ats_match_percentage:.1f}% >= {threshold:.0f}% threshold; "
+                "queued for the agent. Submission still needs your approval.",
+                application_id=application.id,
+            )
     elif threshold is not None:
         db.log_event(
             user_id, "below_threshold",

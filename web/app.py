@@ -42,6 +42,12 @@ def _fmt_tokens(value: int | None) -> str:
 templates.env.filters["money"] = _fmt_money
 templates.env.filters["tokens"] = _fmt_tokens
 
+# Default bindings so a template rendered without a signed-in user still works;
+# the dashboard rebinds these per request to the viewer's own zone.
+from web.timefmt import make_filters as _make_time_filters  # noqa: E402
+
+templates.env.filters.update(_make_time_filters(settings.DEFAULT_TIMEZONE))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

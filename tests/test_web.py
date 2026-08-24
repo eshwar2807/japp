@@ -1099,3 +1099,101 @@ def test_the_dashboard_says_nothing_is_sent_until_the_agent_runs(web):
     discover = web.get("/discover").text
     assert "Tailored today" in discover
     assert "Submitted today" in discover
+
+
+# ---------------- timezone ----------------
+
+
+def test_timestamps_render_in_the_users_timezone(web):
+    """A log read at 9pm in California showing 04:00 the next day is a log
+    nobody can reconcile with what they just did."""
+    from datetime import datetime, timezone as tz
+
+    from database.models import RunLog
+
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.update_user(user.id, timezone="America/Los_Angeles")
+
+    with web.db.session() as session:
+        session.add(RunLog(user_id=user.id, event="probe", message="marker",
+                           created_at=datetime(2026, 8, 24, 4, 41, tzinfo=tz.utc)))
+
+    page = web.get("/logs").text
+    assert "21:41" in page           # 04:41 UTC is 21:41 the previous day in PDT
+    assert "America/Los_Angeles" in page
+
+
+def test_a_different_user_sees_their_own_zone(web):
+    """Filters are bound per request, not globally."""
+    from datetime import datetime, timezone as tz
+
+    from database.models import RunLog
+
+    signup(web, "ada@example.com")
+    ada = web.db.get_user_by_email("ada@example.com")
+    web.db.update_user(ada.id, timezone="America/Los_Angeles")
+
+    other = TestClient(web.app, follow_redirects=False)
+    signup(other, "eve@example.com")
+    eve = web.db.get_user_by_email("eve@example.com")
+    web.db.update_user(eve.id, timezone="Asia/Kolkata")
+
+    stamp = datetime(2026, 8, 24, 4, 41, tzinfo=tz.utc)
+    with web.db.session() as session:
+        session.add(RunLog(user_id=ada.id, event="p", message="m", created_at=stamp))
+        session.add(RunLog(user_id=eve.id, event="p", message="m", created_at=stamp))
+
+    assert "21:41" in web.get("/logs").text          # PDT
+    assert "10:11" in other.get("/logs").text        # IST
+
+
+def test_an_unknown_timezone_is_refused(web):
+    signup(web, "ada@example.com")
+    response = web.post("/settings/timezone",
+                        data={"timezone_name": "Mars/Olympus", "csrf_token": csrf(web)})
+    assert "error=" in response.headers["location"]
+    assert web.db.get_user_by_email("ada@example.com").timezone == "UTC"
+
+
+def test_the_timezone_can_be_changed(web):
+    signup(web, "ada@example.com")
+    web.post("/settings/timezone",
+             data={"timezone_name": "America/Los_Angeles", "csrf_token": csrf(web)})
+    assert web.db.get_user_by_email("ada@example.com").timezone == "America/Los_Angeles"
+
+
+# ---------------- duplicate apply jobs ----------------
+
+
+def test_clicking_run_application_twice_queues_one_job(web):
+    """Two identical apply jobs were queued for one application."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    app = web.db.create_application(company="Branch", role_title="Senior Engineer",
+                                    job_url="https://x.com/1", match_score=90.0,
+                                    user_id=user.id)
+
+    token = csrf(web)
+    web.post(f"/applications/{app.id}/apply", data={"csrf_token": token})
+    web.post(f"/applications/{app.id}/apply", data={"csrf_token": token})
+
+    apply_jobs = [j for j in web.db.list_jobs(user_id=user.id) if j.kind == "apply"]
+    assert len(apply_jobs) == 1
+
+
+def test_a_finished_apply_job_does_not_block_requeueing(web):
+    """Retrying a failed application must still be possible."""
+    from database.models import JobStatus
+
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    app = web.db.create_application(company="Branch", role_title="Senior Engineer",
+                                    job_url="https://x.com/1", user_id=user.id)
+    job = web.db.enqueue_job(user.id, kind="apply", job_url="https://x.com/1",
+                             application_id=app.id)
+    web.db.finish_job(job.id, JobStatus.FAILED, "driver error")
+
+    assert web.db.has_pending_apply_job(app.id) is False
+    web.post(f"/applications/{app.id}/apply", data={"csrf_token": csrf(web)})
+    assert len([j for j in web.db.list_jobs(user_id=user.id) if j.kind == "apply"]) == 2
