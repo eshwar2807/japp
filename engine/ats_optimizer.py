@@ -94,6 +94,12 @@ _FILLER_TOKENS = {
     "architectures", "architecture", "services", "service", "systems", "system",
     "development", "engineering", "practices", "principles", "fundamentals",
     "technologies", "tools", "frameworks", "concepts", "based",
+    # Generic nouns that appear as the head of a requirement but name nothing
+    # on their own. Without these, "data modeling" was credited against
+    # "Spring Data JPA" purely because both contain the word data.
+    "data", "code", "web", "application", "applications", "platform",
+    "platforms", "business", "project", "projects", "process", "processes",
+    "solution", "solutions", "environment", "environments", "quality",
 }
 
 #: Below this length a keyword is matched on exact word boundaries only. "Go",
@@ -167,9 +173,16 @@ def keyword_present(keyword: str, haystack: str, threshold: int | None = None) -
     if kw in hay:
         return True
 
-    # Multi-word: every meaningful token must be evidenced. Filler words carry
-    # no signal, so requiring them would reject fair paraphrases.
+    # Multi-word: the requirement is carried by its head. "Git version control"
+    # asks for Git; "API security patterns" asks about APIs. Demanding every
+    # token marked those uncovered against a profile that plainly has Git and
+    # API work. The head token is also what keeps this honest - "Python
+    # microservices" still fails, because its head is Python.
     meaningful = [t for t in tokens if t not in _FILLER_TOKENS and len(t) > 2]
+    if meaningful and _word_in(meaningful[0], words):
+        return True
+    # Or any ordering where every meaningful token is evidenced, which catches
+    # phrases whose head is a filler-ish word ("continuous integration").
     if meaningful and all(_word_in(token, words) for token in meaningful):
         return True
 
@@ -313,6 +326,54 @@ def ceiling_score(keywords: JDKeywords, profile: MasterProfile) -> tuple[float, 
 
     ceiling = 100.0 * earned / available if available else 0.0
     return round(min(ceiling, 100.0), 1), unreachable
+
+
+#: Rough technology-term detector for text that has not been through pass 1:
+#: capitalised words, CamelCase, dotted or slashed names, versioned tools.
+_TECH_TERM = re.compile(
+    r"\b(?:[A-Z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9]+)+"       # Node.js, Spring.Boot
+    r"|[A-Z]{2,}(?:/[A-Z]{2,})*"                        # AWS, CI/CD, SQL
+    r"|[A-Z][a-z]+[A-Z][a-zA-Z]*"                       # JavaScript, PostgreSQL
+    r"|[A-Z][a-z]{2,})\b"                               # Java, Docker, Python
+)
+
+#: Words that pass the shape test but name no technology.
+_NOT_TECH = {
+    "the", "we", "you", "our", "your", "this", "that", "and", "for", "with",
+    "as", "at", "in", "on", "to", "of", "is", "are", "will", "have", "has",
+    "who", "what", "why", "how", "when", "where", "please", "apply", "role",
+    "team", "teams", "work", "working", "company", "job", "about", "us",
+    "experience", "years", "engineer", "engineers", "engineering", "software",
+    "senior", "staff", "principal", "manager", "responsibilities", "required",
+    "requirements", "qualifications", "preferred", "benefits", "equal",
+    "opportunity", "employer", "salary", "range", "location", "remote",
+    "office", "candidates", "candidate", "position", "positions", "hiring",
+    "million", "billion", "customers", "products", "product", "build",
+    "building", "design", "develop", "development", "our", "their",
+}
+
+
+def estimate_ceiling(job_text: str, profile: MasterProfile) -> float:
+    """Approximate the best achievable score from raw posting text.
+
+    Costs nothing: no LLM call, no network. Used to rank a board's postings
+    before deciding which are worth an extraction call, and to skip the ones
+    that plainly cannot clear the bar.
+
+    The signal that matters is the *ratio* - what fraction of the technologies
+    a posting names the profile can evidence. Counting matches alone favours
+    verbose postings, which name many things the candidate has and many more
+    they do not.
+    """
+    corpus = profile_corpus(profile)
+    terms = {
+        term for term in _TECH_TERM.findall(job_text or "")
+        if term.lower() not in _NOT_TECH and len(term) > 1
+    }
+    if not terms:
+        return 0.0
+    covered = sum(1 for term in terms if keyword_present(term, corpus))
+    return round(100.0 * covered / len(terms), 1)
 
 
 class NotViable(Exception):

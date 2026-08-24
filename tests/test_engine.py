@@ -457,3 +457,101 @@ def test_extracted_text_preserves_every_bullet(tailored, real_profile, tmp_path)
     for block in tailored.tailored_experience:
         for bullet in block.bullets:
             assert " ".join(bullet.split()) in normalized, f"bullet lost in render: {bullet}"
+
+
+# ---------------- matcher calibration ----------------
+#
+# Hand-checked cases against a Java/Spring enterprise profile. The matcher was
+# wrong in both directions: it missed real coverage on paraphrased multi-word
+# requirements, and credited short technology names that appeared inside longer
+# words. Both distorted every score in the system.
+
+
+@pytest.fixture()
+def java_corpus():
+    from engine.ats_optimizer import profile_corpus
+
+    profile = MasterProfile.model_validate({
+        "contact": {"full_name": "E N", "email": "a@b.com"},
+        "skills": {
+            "hard": ["Microservices Architecture", "RESTful API Development",
+                     "Cloud-Native Deployment", "CI/CD Pipeline Automation",
+                     "Docker Containerization & Orchestration",
+                     "Scalable Distributed Systems", "High-Availability System Design",
+                     "Application Security & Vulnerability Remediation"],
+            "tooling": ["Java", "Spring Boot", "Spring Data JPA", "Git", "GitHub",
+                        "Docker", "Kubernetes", "Jenkins", "SQL", "Hibernate"],
+        },
+        "experience": [{"company": "Acme", "title": "Senior Software Engineer",
+                        "start_date": "2021-01", "is_current": True,
+                        "bullets": ["Led API gateway migration."]}],
+    })
+    return profile_corpus(profile)
+
+
+@pytest.mark.parametrize("requirement", [
+    "cloud-native architectures",      # profile says Cloud-Native Deployment
+    "container orchestration",         # Docker Containerization & Orchestration
+    "RESTful APIs",                    # RESTful API Development (plural)
+    "Git version control",             # Git
+    "API security patterns",           # RESTful API + Application Security
+    "microservices architecture",
+    "distributed systems",
+    "CI/CD pipelines",
+    "Java",
+    "Spring Boot",
+])
+def test_paraphrased_requirements_are_recognised(java_corpus, requirement):
+    """These were all scored as missing, which capped every ceiling far below
+    what the profile actually supports."""
+    from engine.ats_optimizer import keyword_present
+
+    assert keyword_present(requirement, java_corpus) is True
+
+
+@pytest.mark.parametrize("requirement", [
+    "Go",                    # matched fuzzily against an unrelated word
+    "Scala",                 # matched inside "Scalable"
+    "Python", "Kotlin", "Rust", "Spark", "Terraform", "GraphQL", "AWS Lambda",
+    "machine learning",
+    "data modeling",         # matched on "data" from Spring Data JPA
+    "Python microservices",  # claimed Python behind a familiar second word
+    "Hexagonal architecture",
+])
+def test_absent_technologies_are_not_credited(java_corpus, requirement):
+    """A false positive here inflates the score and, because the fabrication
+    check shares this function, lets an invented skill look supported."""
+    from engine.ats_optimizer import keyword_present
+
+    assert keyword_present(requirement, java_corpus) is False
+
+
+def test_short_names_require_an_exact_word(java_corpus):
+    """Two- and three-letter languages must not ride on a longer word."""
+    from engine.ats_optimizer import keyword_present
+
+    assert keyword_present("Java", java_corpus) is True     # present exactly
+    assert keyword_present("Go", java_corpus) is False
+    assert keyword_present("R", java_corpus) is False
+
+
+def test_ceiling_reflects_what_the_profile_can_reach(java_corpus):
+    """The ceiling is what a resume containing everything would score, so a
+    posting the profile cannot meet is identifiable before any tailoring."""
+    from engine.ats_optimizer import ceiling_score
+    from engine.schemas import JDKeywords, MasterProfile
+
+    profile = MasterProfile.model_validate({
+        "contact": {"full_name": "E", "email": "a@b.com"},
+        "skills": {"hard": ["Microservices Architecture"],
+                   "tooling": ["Java", "Spring Boot", "Docker"]},
+    })
+    reachable = JDKeywords(role_title="Java Engineer",
+                           hard_skills=["microservices architecture"],
+                           tooling=["Java", "Spring Boot", "Docker"])
+    unreachable = JDKeywords(role_title="ML Engineer",
+                             hard_skills=["machine learning"],
+                             tooling=["Python", "PyTorch", "Spark"])
+
+    assert ceiling_score(reachable, profile)[0] == 100.0
+    assert ceiling_score(unreachable, profile)[0] < 20.0

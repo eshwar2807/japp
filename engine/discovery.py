@@ -213,7 +213,7 @@ class DiscoveryEngine:
     # ---------------- stage 2: real postings ----------------
 
     def rank_by_fit(
-        self, postings: list[Posting], profile: Any, target: float
+        self, postings: list[Posting], profile: Any, target: float = 0.0
     ) -> tuple[list[Posting], list[tuple[Posting, float]]]:
         """Order postings by how much of each one the profile already covers.
 
@@ -224,20 +224,13 @@ class DiscoveryEngine:
 
         Returns (viable, rejected_with_scores).
         """
-        from engine.ats_optimizer import keyword_present, profile_corpus
+        from engine.ats_optimizer import estimate_ceiling
 
-        corpus = profile_corpus(profile)
-        scored = []
-        for posting in postings:
-            # Terms the profile actually has, weighed against the posting text.
-            hits = sum(1 for skill in profile.skills.flat
-                       if skill and keyword_present(skill, posting.description))
-            # A rough coverage proxy: how much of the profile the posting wants.
-            denominator = max(len(profile.skills.flat), 1)
-            scored.append((posting, round(100.0 * hits / denominator, 1)))
-
+        scored = [(posting, estimate_ceiling(posting.description, profile))
+                  for posting in postings]
         scored.sort(key=lambda pair: -pair[1])
-        return [p for p, _ in scored], scored
+        viable = [p for p, score in scored if score >= target]
+        return viable, scored
 
     def collect_postings(
         self,
