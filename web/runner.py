@@ -101,6 +101,17 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     # Bulk discovery work runs on the cheap tier; roles flagged as priority get
     # the expensive one. Resolved before it is logged.
     model = db.model_for_job(user_id, bool(job.priority))
+    # The application cap governs successes. Checked here rather than at queue
+    # time, because a posting rejected as unviable never becomes one.
+    if db.applications_today(user_id) >= settings.DAILY_APPLICATION_CAP:
+        db.log_event(
+            user_id, "application_cap",
+            f"Daily cap of {settings.DAILY_APPLICATION_CAP} applications reached; "
+            "leaving the rest of the queue for tomorrow.",
+        )
+        db.finish_job(job_id, JobStatus.DONE, "Skipped: daily application cap reached")
+        return
+
     db.log_event(user_id, "tailor_start",
                  f"Tailoring for {job.job_url} on {model}"
                  f"{' (priority)' if job.priority else ''}")
@@ -360,11 +371,14 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     )
     postings = [p for p in result["postings"] if p.url not in seen_urls]
 
-    # Respect the remaining daily allowance rather than dumping 500 jobs in.
-    remaining = max(settings.DAILY_APPLICATION_CAP - db.applications_today(user_id), 0)
+    # Screening budget, not application budget. Most of these will be rejected
+    # by the viability check for one cheap call each, and twenty matches means
+    # looking at far more than twenty postings.
+    remaining = max(settings.DAILY_SCREEN_CAP - db.screened_today(user_id), 0)
     if remaining <= 0:
         db.finish_job(job_id, JobStatus.DONE,
-                      "Daily application cap already reached; queued nothing.")
+                      f"Daily screening cap of {settings.DAILY_SCREEN_CAP} reached; "
+                      "queued nothing.")
         return
     postings = postings[:remaining]
 

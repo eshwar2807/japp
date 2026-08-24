@@ -412,10 +412,12 @@ def test_discovery_skips_postings_already_applied_to(db, user, monkeypatch):
     assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []
 
 
-def test_discovery_respects_the_daily_application_cap(db, user, monkeypatch):
+def test_discovery_respects_the_daily_screening_cap(db, user, monkeypatch):
+    """Screening is budgeted separately from applications: most postings are
+    rejected for one cheap call, so the screening allowance is much larger."""
     from web.runner import run_discovery_job
 
-    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 3)
+    monkeypatch.setattr(settings, "DAILY_SCREEN_CAP", 3)
     db.set_anthropic_key(user.id, "sk-ant-test")
     job = db.enqueue_job(user.id, kind="discover",
                          job_description=DiscoveryCriteria().model_dump_json())
@@ -437,13 +439,12 @@ def test_discovery_respects_the_daily_application_cap(db, user, monkeypatch):
     assert len([j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]) == 3
 
 
-def test_discovery_stops_when_the_daily_cap_is_already_spent(db, user, monkeypatch):
+def test_discovery_stops_when_the_screening_cap_is_already_spent(db, user, monkeypatch):
     from web.runner import run_discovery_job
 
-    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 1)
+    monkeypatch.setattr(settings, "DAILY_SCREEN_CAP", 1)
     db.set_anthropic_key(user.id, "sk-ant-test")
-    db.create_application(company="X", role_title="Y", job_url="https://x.com/1",
-                          user_id=user.id)
+    db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/already")
     job = db.enqueue_job(user.id, kind="discover",
                          job_description=DiscoveryCriteria().model_dump_json())
 
@@ -457,8 +458,10 @@ def test_discovery_stops_when_the_daily_cap_is_already_spent(db, user, monkeypat
     monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
     run_discovery_job(db, job.id, user.id, gatekeeper=None)
 
-    assert "cap already reached" in db.get_job(job.id).message
-    assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []
+    assert "reached" in db.get_job(job.id).message
+    # Only the job that consumed the budget; discovery added none.
+    tailor_jobs = [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]
+    assert [j.job_url for j in tailor_jobs] == ["https://x.com/already"]
 
 
 def test_the_spend_cap_check_is_a_fixed_number_of_queries(db, monkeypatch):
@@ -633,3 +636,41 @@ def test_the_filter_is_not_us_specific():
 
 def test_no_location_filter_accepts_anything():
     assert matches(_at("Remote Canada"), ["backend"], [], []) is True
+
+
+def test_screening_is_budgeted_separately_from_applications(db, user, monkeypatch):
+    """An unviable posting costs one extraction call and creates nothing, so
+    the screening allowance has to be far larger than the application cap or
+    twenty matches can never be found."""
+    monkeypatch.setattr(settings, "DAILY_SCREEN_CAP", 250)
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+
+    for i in range(30):
+        db.enqueue_job(user.id, kind="tailor", job_url=f"https://x.com/{i}")
+    for i in range(5):
+        db.create_application(company=f"Co{i}", role_title="Engineer",
+                              job_url=f"https://y.com/{i}", user_id=user.id)
+
+    assert db.screened_today(user.id) == 30
+    assert db.applications_today(user.id) == 5
+    assert settings.DAILY_SCREEN_CAP > settings.DAILY_APPLICATION_CAP
+
+
+def test_tailoring_stops_once_the_application_cap_is_reached(db, user, monkeypatch):
+    """The queue keeps its remaining postings for tomorrow rather than
+    tailoring past the cap."""
+    from web.runner import run_tailor_job
+
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 2)
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    for i in range(2):
+        db.create_application(company=f"Co{i}", role_title="Engineer",
+                              job_url=f"https://y.com/{i}", user_id=user.id)
+
+    job = db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/1",
+                         job_description="A role.")
+    run_tailor_job(db, job.id, user.id, gatekeeper=None)
+
+    assert "application cap" in db.get_job(job.id).message.lower()
+    # No third application was created.
+    assert db.applications_today(user.id) == 2

@@ -1351,3 +1351,23 @@ class DBManager:
                     RunJob.status.not_in(TERMINAL_JOB_STATUSES),
                 ).limit(1)
             ).first() is not None
+
+    def screened_today(self, user_id: int) -> int:
+        """Postings queued for screening since midnight UTC.
+
+        Counts tailor jobs rather than applications: most postings are rejected
+        by the viability check and never become one, and the screening budget
+        needs to reflect what was actually looked at.
+        """
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            return int(
+                sess.scalar(
+                    select(func.count(RunJob.id)).where(
+                        RunJob.user_id == user_id,
+                        RunJob.kind == "tailor",
+                        RunJob.created_at >= start,
+                    )
+                )
+                or 0
+            )

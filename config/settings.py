@@ -69,8 +69,14 @@ LLM_MODEL_DISCOVERY = os.getenv("JP_LLM_MODEL_DISCOVERY", "claude-opus-5")
 # Hard ceiling on LLM spend per user per day. The queue pauses rather than
 # billing past it; 0 disables the cap.
 DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
-# Applications the discovery queue may enqueue per user per day.
+# Applications actually created per user per day. A posting that cannot reach
+# the match target never becomes an application, so this counts successes.
 DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "20"))
+# Postings discovery may queue for screening per day. Deliberately much higher
+# than the application cap: screening a posting that turns out unviable costs
+# one cheap extraction call, and finding twenty matches means looking at far
+# more than twenty postings.
+DAILY_SCREEN_CAP = int(os.getenv("JP_DAILY_SCREEN_CAP", "250"))
 # Default auto-apply threshold for new accounts. 0 disables it.
 AUTO_APPLY_THRESHOLD = float(os.getenv("JP_AUTO_APPLY_THRESHOLD", "0"))
 # Minimum free text-only fit estimate for a discovered posting to be queued.
