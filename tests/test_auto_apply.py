@@ -14,6 +14,14 @@ from config import settings
 from database.models import JobStatus
 
 
+#: Passes the hard pre-screen: Java, under the years limit, no clearance, no
+#: sponsorship refusal. Fixtures need one or tailoring is skipped before it runs.
+JAVA_JD = (
+    "Senior Java Engineer. Spring Boot microservices, REST APIs, Kubernetes. "
+    "4+ years of experience. Remote US."
+)
+
+
 @pytest.fixture()
 def user(db):
     user = db.create_user("ada@example.com", "$argon2id$fake")
@@ -62,7 +70,7 @@ def _tailor(db, user, score, monkeypatch, tmp_path, url="https://x.com/j/1"):
     monkeypatch.setattr("engine.pdf_generator.PDFGenerator", FakePDF)
 
     job = db.enqueue_job(user.id, kind="tailor", job_url=url,
-                         job_description="Python role.")
+                         job_description=JAVA_JD)
     runner.run_tailor_job(db, job.id, user.id, gatekeeper=None)
     return job
 

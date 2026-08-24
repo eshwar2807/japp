@@ -1204,6 +1204,30 @@ class DBManager:
                 or 0
             )
 
+    def eligible_today(self, user_id: int, threshold: float | None = None) -> int:
+        """Applications created today that actually qualify to be sent.
+
+        The daily cap counts these rather than every draft: a 45% match is not
+        one of the twenty applications the user asked for, and stopping at
+        twenty drafts would leave them with one usable role.
+        """
+        from config import settings as _settings
+
+        if threshold is None:
+            threshold = _settings.ELIGIBLE_MATCH_THRESHOLD
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            return int(
+                sess.scalar(
+                    select(func.count(Application.id)).where(
+                        Application.user_id == user_id,
+                        Application.created_at >= start,
+                        Application.match_score >= threshold,
+                    )
+                )
+                or 0
+            )
+
     def model_for_job(self, user_id: int, priority: bool) -> str:
         """Tiered model choice: cheap for bulk, expensive for flagged roles."""
         from config import settings as _settings

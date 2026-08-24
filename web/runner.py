@@ -101,15 +101,16 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     # Bulk discovery work runs on the cheap tier; roles flagged as priority get
     # the expensive one. Resolved before it is logged.
     model = db.model_for_job(user_id, bool(job.priority))
-    # The application cap governs successes. Checked here rather than at queue
-    # time, because a posting rejected as unviable never becomes one.
-    if db.applications_today(user_id) >= settings.DAILY_APPLICATION_CAP:
+    # The cap counts applications worth sending, not drafts. Stopping at twenty
+    # drafts when only one qualifies would leave the user with one usable role.
+    if db.eligible_today(user_id) >= settings.DAILY_APPLICATION_CAP:
         db.log_event(
             user_id, "application_cap",
-            f"Daily cap of {settings.DAILY_APPLICATION_CAP} applications reached; "
+            f"{settings.DAILY_APPLICATION_CAP} applications at or above "
+            f"{settings.ELIGIBLE_MATCH_THRESHOLD:.0f}% found today; "
             "leaving the rest of the queue for tomorrow.",
         )
-        db.finish_job(job_id, JobStatus.DONE, "Skipped: daily application cap reached")
+        db.finish_job(job_id, JobStatus.DONE, "Skipped: daily target already met")
         return
 
     db.log_event(user_id, "tailor_start",
@@ -120,6 +121,27 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     if not jd_text:
         db.log_event(user_id, "fetch_jd", "Fetching the posting")
         jd_text = fetch_job_description(job.job_url)
+
+    # Hard constraints, checked before anything is spent. These are not
+    # preferences: a clearance an H-1B holder cannot obtain, or an employer who
+    # states they will not sponsor, closes the role however well it fits.
+    from engine.eligibility import assess
+
+    verdict = assess(
+        job.job_url, jd_text,
+        require_java=settings.REQUIRE_JAVA,
+        max_years=settings.MAX_YEARS_REQUIRED,
+        needs_sponsorship=str(
+            profile.legal.get("requires_sponsorship_now_or_future", "")
+        ).strip().lower().startswith("y"),
+        can_obtain_clearance=settings.CAN_OBTAIN_CLEARANCE,
+    )
+    if not verdict.eligible:
+        db.log_event(user_id, "ineligible",
+                     f"{job.job_url}: " + "; ".join(verdict.reasons))
+        db.finish_job(job_id, JobStatus.DONE,
+                      "Skipped: " + "; ".join(verdict.reasons))
+        return
 
     application_ref: list[int | None] = [job.application_id]
     optimizer = ATSOptimizer(

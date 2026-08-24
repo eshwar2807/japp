@@ -69,9 +69,18 @@ LLM_MODEL_DISCOVERY = os.getenv("JP_LLM_MODEL_DISCOVERY", "claude-opus-5")
 # Hard ceiling on LLM spend per user per day. The queue pauses rather than
 # billing past it; 0 disables the cap.
 DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
-# Applications actually created per user per day. A posting that cannot reach
-# the match target never becomes an application, so this counts successes.
+# Eligible applications per user per day. "Eligible" means scoring at or above
+# ELIGIBLE_MATCH_THRESHOLD - a draft nobody would send is not one of the twenty
+# the user asked for, so screening continues until this many genuinely qualify.
 DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "20"))
+ELIGIBLE_MATCH_THRESHOLD = float(os.getenv("JP_ELIGIBLE_MATCH_THRESHOLD", "70"))
+
+# Hard constraints applied before anything is spent on a posting.
+REQUIRE_JAVA = os.getenv("JP_REQUIRE_JAVA", "true").lower() == "true"
+MAX_YEARS_REQUIRED = int(os.getenv("JP_MAX_YEARS_REQUIRED", "6"))
+# An H-1B holder cannot obtain a US security clearance, and a transfer is
+# sponsorship, so postings ruling either out are closed regardless of fit.
+CAN_OBTAIN_CLEARANCE = os.getenv("JP_CAN_OBTAIN_CLEARANCE", "false").lower() == "true"
 # Postings discovery may queue for screening per day. Deliberately much higher
 # than the application cap: screening a posting that turns out unviable costs
 # one cheap extraction call, and finding twenty matches means looking at far

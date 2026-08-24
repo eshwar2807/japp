@@ -663,14 +663,17 @@ def test_tailoring_stops_once_the_application_cap_is_reached(db, user, monkeypat
 
     monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 2)
     db.set_anthropic_key(user.id, "sk-ant-test")
+    # The cap counts applications worth sending, so these must clear the bar.
     for i in range(2):
         db.create_application(company=f"Co{i}", role_title="Engineer",
-                              job_url=f"https://y.com/{i}", user_id=user.id)
+                              job_url=f"https://y.com/{i}", match_score=85.0,
+                              user_id=user.id)
 
-    job = db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/1",
-                         job_description="A role.")
+    job = db.enqueue_job(
+        user.id, kind="tailor", job_url="https://x.com/1",
+        job_description="Senior Java Engineer. Spring Boot, REST APIs. 4+ years.")
     run_tailor_job(db, job.id, user.id, gatekeeper=None)
 
-    assert "application cap" in db.get_job(job.id).message.lower()
+    assert "target already met" in db.get_job(job.id).message.lower()
     # No third application was created.
     assert db.applications_today(user.id) == 2

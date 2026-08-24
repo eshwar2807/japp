@@ -225,9 +225,28 @@ class DiscoveryEngine:
         Returns (viable, rejected_with_scores).
         """
         from engine.ats_optimizer import estimate_ceiling
+        from engine.eligibility import assess
 
-        scored = [(posting, estimate_ceiling(posting.description, profile))
-                  for posting in postings]
+        from config import settings as _settings
+
+        needs_sponsorship = str(
+            (profile.legal or {}).get("requires_sponsorship_now_or_future", "")
+        ).strip().lower().startswith("y")
+
+        scored = []
+        for posting in postings:
+            verdict = assess(
+                posting.title, posting.description,
+                require_java=_settings.REQUIRE_JAVA,
+                max_years=_settings.MAX_YEARS_REQUIRED,
+                needs_sponsorship=needs_sponsorship,
+                can_obtain_clearance=_settings.CAN_OBTAIN_CLEARANCE,
+            )
+            if not verdict.eligible:
+                log.info("Skipping %s: %s", posting.title[:40], "; ".join(verdict.reasons))
+                continue
+            scored.append((posting, estimate_ceiling(posting.description, profile)))
+
         scored.sort(key=lambda pair: -pair[1])
         viable = [p for p, score in scored if score >= target]
         return viable, scored
