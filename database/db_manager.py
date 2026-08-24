@@ -320,10 +320,16 @@ class DBManager:
                 from config import settings as _settings
 
                 bar = threshold if threshold is not None else _settings.ELIGIBLE_MATCH_THRESHOLD
-                stmt = stmt.where(
-                    Application.eligible.is_(True),
-                    Application.match_score >= bar,
-                ).order_by(Application.match_score.desc())
+                # order_by appends rather than replaces, so the creation-date
+                # ordering set above has to be cleared or it wins.
+                stmt = (
+                    stmt.where(
+                        Application.eligible.is_(True),
+                        Application.match_score >= bar,
+                    )
+                    .order_by(None)
+                    .order_by(Application.match_score.desc())
+                )
             return sess.scalars(stmt).all()
 
     def update_application(self, app_id: int, user_id: int | None = None, **fields) -> Application:
