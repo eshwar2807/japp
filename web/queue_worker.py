@@ -302,6 +302,7 @@ class QueueWorker:
         self._capped_cache: set[int] = set()
         self._capped_checked_at = 0.0
         self._last_digest_check = 0.0
+        self._last_topup_check = 0.0
         #: Overridden in tests to avoid launching a real browser.
         self.handlers: dict[str, Callable[..., Any]] = {}
 
@@ -350,6 +351,7 @@ class QueueWorker:
             if job is None:
                 self._release()
                 self._maybe_send_digests()
+                self._maybe_topup()
                 self._stop.wait(POLL_SECONDS)
                 continue
             self._spawn(job)
@@ -391,6 +393,30 @@ class QueueWorker:
                                               message, "/settings"))
         except Exception:
             log.exception("Could not send spend-cap notice")
+
+    def _maybe_topup(self) -> None:
+        """Queue the daily top-up for users whose hour has come."""
+        now = time.monotonic()
+        if now - self._last_topup_check < 60:
+            return
+        self._last_topup_check = now
+
+        try:
+            due = self.db.users_due_for_topup()
+        except Exception:
+            log.exception("Top-up check failed")
+            return
+
+        for user_id in due:
+            try:
+                # Recorded before queueing, so a failure cannot make it fire
+                # repeatedly for the rest of the day.
+                self.db.mark_topup_run(user_id)
+                job = self.db.enqueue_job(user_id, kind="topup")
+                self.db.log_event(user_id, "topup_scheduled",
+                                  f"Daily top-up queued as job #{job.id}")
+            except Exception:
+                log.exception("Could not queue top-up for user %s", user_id)
 
     def _maybe_send_digests(self) -> None:
         """Send end-of-day summaries. Checked at most once a minute."""
@@ -536,4 +562,5 @@ def _default_handlers() -> dict[str, Callable[..., Any]]:
         "tailor": runner.run_tailor_job,
         "apply": runner.run_apply_job,
         "discover": runner.run_discovery_job,
+        "topup": runner.run_topup_job,
     }

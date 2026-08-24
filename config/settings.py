@@ -84,6 +84,20 @@ CAN_OBTAIN_CLEARANCE = os.getenv("JP_CAN_OBTAIN_CLEARANCE", "false").lower() == 
 # Drop Staff, Principal and above by title. More reliable than parsing years
 # text, which postings phrase inconsistently.
 EXCLUDE_ABOVE_LEVEL = os.getenv("JP_EXCLUDE_ABOVE_LEVEL", "true").lower() == "true"
+
+# Companies whose boards the daily top-up screens. Boards are free to read, so
+# breadth here costs nothing until a posting survives the filters.
+TOPUP_COMPANIES = [
+    c.strip() for c in os.getenv("JP_TOPUP_COMPANIES", "").split(",") if c.strip()
+] or [
+    "Toast", "Samsara", "Flexport", "Plaid", "Confluent", "Instructure", "ezCater",
+    "Aperia Solutions", "SmithRx", "Datavant", "Fanatics", "Affirm", "Robinhood",
+    "Stripe", "Databricks", "Marqeta", "Interactive Brokers", "GHX", "Encora",
+    "PerfectServe", "Tebra", "HealthJoy", "Octus", "Behavox", "EarnIn", "Mercury",
+    "Spring Health", "Cloudflare", "Datadog", "Gusto", "Betterment", "Oscar Health",
+    "Included Health", "Zocdoc", "Vanta", "Chime", "Wise", "Tenable",
+    "Western Digital", "Sodexo", "Nuvei", "Alloy", "Unit21",
+]
 # Postings discovery may queue for screening per day. Deliberately much higher
 # than the application cap: screening a posting that turns out unviable costs
 # one cheap extraction call, and finding twenty matches means looking at far
@@ -164,7 +178,7 @@ LOG_RETENTION_DAYS = int(os.getenv("JP_LOG_RETENTION_DAYS", "90"))
 # so browser work is left to a local agent, where a human can see the window.
 WORKER_KINDS = tuple(
     k.strip()
-    for k in os.getenv("JP_WORKER_KINDS", "tailor,apply,discover").split(",")
+    for k in os.getenv("JP_WORKER_KINDS", "tailor,apply,discover,topup").split(",")
     if k.strip()
 )
 

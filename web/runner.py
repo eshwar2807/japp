@@ -434,3 +434,80 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
                f"{len(postings)} postings queued")
     db.log_event(user_id, "discovery_done", message)
     db.finish_job(job_id, JobStatus.DONE, message)
+
+
+# --------------------------------------------------------------------------
+# Daily top-up
+# --------------------------------------------------------------------------
+
+
+def run_topup_job(db, job_id: int, user_id: int, gatekeeper) -> None:
+    """Screen known boards until the ready target is met again.
+
+    Reads boards directly rather than asking a model to find companies. Board
+    reads are free and reliable; a model guessing company board slugs produced
+    eight consecutive runs that queued nothing at all.
+    """
+    from engine.ats_optimizer import estimate_ceiling
+    from engine.boards import ensure_description, matches, resolve_board
+    from engine.eligibility import assess
+
+    profile = load_profile(db, user_id)
+    needs_sponsorship = str(
+        profile.legal.get("requires_sponsorship_now_or_future", "")
+    ).strip().lower().startswith("y")
+
+    ready = db.eligible_today(user_id)
+    target = settings.DAILY_APPLICATION_CAP
+    if ready >= target:
+        db.finish_job(job_id, JobStatus.DONE,
+                      f"{ready} already ready; nothing to top up.")
+        return
+
+    db.log_event(user_id, "topup_start",
+                 f"{ready}/{target} ready; screening {len(settings.TOPUP_COMPANIES)} boards")
+
+    seen = {a.job_url for a in db.list_applications(limit=1000, user_id=user_id)}
+    seen |= {j.job_url for j in db.list_jobs(user_id=user_id, limit=1000)}
+
+    candidates: list[tuple[float, Any]] = []
+    reachable = 0
+    for company in settings.TOPUP_COMPANIES:
+        resolved = resolve_board(company, "")
+        if not resolved:
+            continue
+        reachable += 1
+        for posting in resolved[2]:
+            if posting.url in seen:
+                continue
+            if not matches(posting,
+                           ["java", "software engineer", "backend", "developer"],
+                           ["remote", "united states"],
+                           ["intern", "manager", "director"]):
+                continue
+            posting = ensure_description(posting)
+            verdict = assess(
+                posting.title, posting.description,
+                require_java=settings.REQUIRE_JAVA,
+                max_years=settings.MAX_YEARS_REQUIRED,
+                needs_sponsorship=needs_sponsorship,
+                can_obtain_clearance=settings.CAN_OBTAIN_CLEARANCE,
+                exclude_above_level=settings.EXCLUDE_ABOVE_LEVEL,
+            )
+            if not verdict.eligible:
+                continue
+            posting.company = company
+            candidates.append((estimate_ceiling(posting.description, profile), posting))
+
+    candidates.sort(key=lambda pair: -pair[0])
+    room = max(settings.DAILY_SCREEN_CAP - db.screened_today(user_id), 0)
+    queued = 0
+    for _, posting in candidates[:room]:
+        db.enqueue_job(user_id, kind="tailor", job_url=posting.url,
+                       job_description=posting.description or None, batch_id="topup")
+        queued += 1
+
+    message = (f"{reachable} boards read, {len(candidates)} eligible postings found, "
+               f"{queued} queued for screening")
+    db.log_event(user_id, "topup_done", message)
+    db.finish_job(job_id, JobStatus.DONE, message)

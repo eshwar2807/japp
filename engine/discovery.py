@@ -27,6 +27,7 @@ from engine.boards import (
     Posting,
     dedupe,
     detect_board,
+    ensure_description,
     fetch_board,
     matches,
     resolve_board,
@@ -280,6 +281,10 @@ class DiscoveryEngine:
                            criteria.exclude_title_terms)
                 and not (criteria.remote_only and "remote" not in (p.location or "").lower())
             ]
+            # Some boards omit descriptions from their listing. Filled in only
+            # for what survived the title and location filters, since fetching
+            # every posting would be hundreds of requests per employer.
+            kept = [ensure_description(p) for p in kept]
             for posting in kept:
                 posting.company = company.name or posting.company
             collected.extend(kept)

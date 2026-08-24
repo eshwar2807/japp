@@ -251,6 +251,14 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    #: Daily top-up: screens boards until the ready target is met again.
+    #: Hour is in the user's own timezone, so 3 means 3am where they are.
+    topup_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    topup_hour: Mapped[int] = mapped_column(Integer, default=3)
+    last_topup_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     #: Queue the browser step automatically when a tailored resume scores at
     #: or above this. None disables it and every application waits for a click.
     #: The submit gate is unaffected: nothing is sent without approval.

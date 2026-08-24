@@ -13,7 +13,7 @@ primary_region = "ord"
 [env]
   JP_WEB_PORT = "8080"
   # Browser work stays on your machine, where you can see and clear challenges.
-  JP_WORKER_KINDS = "tailor,discover"
+  JP_WORKER_KINDS = "tailor,discover,topup"
   JP_LOG_RETENTION_DAYS = "90"
   # Fly terminates TLS, so Secure cookies are correct here.
   JP_INSECURE_COOKIES = "false"

@@ -141,8 +141,101 @@ def ashby(board: str) -> list[Posting]:
     return postings
 
 
+def smartrecruiters(company: str, detail_limit: int = 60) -> list[Posting]:
+    """https://api.smartrecruiters.com/v1/companies/{company}/postings
+
+    The listing carries titles and locations but not descriptions, and one
+    detail request per posting would be hundreds of calls for a large employer.
+    So the listing is paged in full and details are fetched only for the
+    postings a caller could plausibly want, newest first.
+    """
+    company = company.strip().strip("/")
+    base = f"https://api.smartrecruiters.com/v1/companies/{urllib.parse.quote(company)}"
+
+    raw: list[dict[str, Any]] = []
+    offset, page = 0, 100
+    while True:
+        payload = _get_json(f"{base}/postings?limit={page}&offset={offset}")
+        batch = payload.get("content") or []
+        raw.extend(batch)
+        offset += page
+        if len(batch) < page or offset >= int(payload.get("totalFound") or 0) or offset >= 400:
+            break
+
+    postings = []
+    for job in raw:
+        location = job.get("location") or {}
+        postings.append(Posting(
+            company=(job.get("company") or {}).get("name") or company,
+            title=job.get("name", ""),
+            # The public apply page, not the API URL the listing returns.
+            url=f"https://jobs.smartrecruiters.com/{company}/{job.get('id', '')}",
+            location=location.get("fullLocation") or ", ".join(
+                str(p) for p in (location.get("city"), location.get("region"),
+                                 location.get("country")) if p),
+            board="smartrecruiters",
+            external_id=str(job.get("id", "")),
+            updated_at=str(job.get("releasedDate", "")),
+            metadata={"detail_url": f"{base}/postings/{job.get('id', '')}"},
+        ))
+    return postings
+
+
+def smartrecruiters_description(posting: Posting) -> str:
+    """Fetch one SmartRecruiters posting's text, since the listing omits it."""
+    detail_url = (posting.metadata or {}).get("detail_url")
+    if not detail_url:
+        return ""
+    try:
+        payload = _get_json(detail_url)
+    except BoardError:
+        return ""
+    sections = ((payload.get("jobAd") or {}).get("sections") or {})
+    parts = [
+        (sections.get(key) or {}).get("text", "")
+        for key in ("companyDescription", "jobDescription", "qualifications",
+                    "additionalInformation")
+    ]
+    return _strip_html("\n\n".join(p for p in parts if p))
+
+
+def workable(account: str) -> list[Posting]:
+    """https://apply.workable.com/api/v1/widget/accounts/{account}"""
+    account = account.strip().strip("/").lower()
+    payload = _get_json(
+        f"https://apply.workable.com/api/v1/widget/accounts/"
+        f"{urllib.parse.quote(account)}?details=true"
+    )
+    postings = []
+    for job in payload.get("jobs") or []:
+        location = job.get("location") or {}
+        if isinstance(location, dict):
+            where = location.get("location_str") or ", ".join(
+                str(p) for p in (location.get("city"), location.get("region"),
+                                 location.get("country")) if p)
+        else:
+            where = str(location)
+        postings.append(Posting(
+            company=payload.get("name") or account,
+            title=job.get("title", ""),
+            url=job.get("url") or job.get("shortlink", ""),
+            location=where,
+            board="workable",
+            external_id=str(job.get("shortcode") or job.get("id", "")),
+            description=_strip_html(job.get("description", "")),
+            updated_at=str(job.get("published_on", "")),
+        ))
+    return postings
+
+
 #: board name -> fetcher
-FETCHERS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby}
+FETCHERS = {
+    "greenhouse": greenhouse,
+    "lever": lever,
+    "ashby": ashby,
+    "smartrecruiters": smartrecruiters,
+    "workable": workable,
+}
 
 
 # --------------------------------------------------------------------------
@@ -154,6 +247,10 @@ _BOARD_PATTERNS = [
     ("greenhouse", re.compile(r"boards-api\.greenhouse\.io/v1/boards/([A-Za-z0-9_-]+)")),
     ("lever", re.compile(r"jobs\.(?:eu\.)?lever\.co/([A-Za-z0-9_-]+)")),
     ("ashby", re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)")),
+    ("smartrecruiters", re.compile(r"jobs\.smartrecruiters\.com/([A-Za-z0-9_.-]+)")),
+    ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9_.-]+)")),
+    ("workable", re.compile(r"apply\.workable\.com/([A-Za-z0-9_-]+)")),
+    ("workable", re.compile(r"([A-Za-z0-9_-]+)\.workable\.com")),
 ]
 
 
@@ -366,6 +463,20 @@ def location_allowed(posting_location: str, requested: Iterable[str]) -> bool:
     # No country named at all - a bare "Remote" or "Hybrid". Allow it only if
     # the search did not restrict to a country other than the US.
     return True
+
+
+def ensure_description(posting: Posting) -> Posting:
+    """Fill in a posting's text if its board omitted it from the listing.
+
+    SmartRecruiters returns titles and locations in bulk but descriptions only
+    per posting. Fetching every one would be hundreds of requests for a large
+    employer, so this is called after the cheap title and location filters have
+    cut the list down.
+    """
+    if posting.description or posting.board != "smartrecruiters":
+        return posting
+    posting.description = smartrecruiters_description(posting)
+    return posting
 
 
 def matches(

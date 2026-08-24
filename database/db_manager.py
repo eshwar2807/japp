@@ -1448,3 +1448,33 @@ class DBManager:
                              application_id=app.id)
             queued += 1
         return queued
+
+    def users_due_for_topup(self) -> list[int]:
+        """Users whose local clock has reached their top-up hour today.
+
+        Mirrors the digest check: the hour is in the user's own timezone, and a
+        run is recorded so a restart during the hour cannot fire it twice.
+        """
+        from web.timefmt import to_zone
+
+        due: list[int] = []
+        now = datetime.now(timezone.utc)
+
+        for user in self.list_users(limit=1000):
+            if not user.topup_enabled or not user.is_active:
+                continue
+            local_now = to_zone(now, user.timezone)
+            if local_now is None or local_now.hour < int(user.topup_hour or 3):
+                continue
+            if user.last_topup_at is not None:
+                last_local = to_zone(user.last_topup_at, user.timezone)
+                if last_local and last_local.date() == local_now.date():
+                    continue
+            due.append(user.id)
+        return due
+
+    def mark_topup_run(self, user_id: int) -> None:
+        with self.session() as sess:
+            user = sess.get(User, user_id)
+            if user:
+                user.last_topup_at = datetime.now(timezone.utc)

@@ -711,6 +711,8 @@ def settings_page(request: Request, user: CurrentUser, db: Database,
         desktop_available=_desktop_available(),
         auto_apply_threshold=db.auto_apply_threshold(user.id),
         common_zones=_common_zones(),
+        topup_companies=len(settings.TOPUP_COMPANIES),
+        daily_target=settings.DAILY_APPLICATION_CAP,
         spend_cap=db.daily_cap_for(user.id),
         spend_today=db.spend_today(user.id),
         api_key_created=user.api_key_created_at,
@@ -763,6 +765,25 @@ def save_anthropic_key(request: Request, user: CurrentUser, db: Database,
     db.log_event(user.id, "anthropic_key",
                  "API key stored (encrypted)" if key else "API key removed")
     return _redirect("/settings", ok="API key saved." if key else "API key removed.")
+
+
+@router.post("/settings/topup")
+def save_topup(request: Request, user: CurrentUser, db: Database,
+               topup_enabled: str = Form(""), topup_hour: str = Form("3"),
+               _csrf: None = CSRFProtected):
+    try:
+        hour = int(topup_hour)
+    except (TypeError, ValueError):
+        return _redirect("/settings", error="The hour must be a number from 0 to 23.")
+    if not 0 <= hour <= 23:
+        return _redirect("/settings", error="The hour must be between 0 and 23.")
+
+    enabled = str(topup_enabled).lower() in ("on", "true", "1")
+    db.update_user(user.id, topup_enabled=enabled, topup_hour=hour)
+    db.log_event(user.id, "topup_settings",
+                 f"Daily top-up {'on at ' + str(hour) + ':00' if enabled else 'off'}")
+    return _redirect("/settings",
+                     ok=f"Daily top-up {'scheduled for ' + str(hour) + ':00' if enabled else 'turned off'}.")
 
 
 @router.post("/settings/timezone")

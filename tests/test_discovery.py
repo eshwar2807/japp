@@ -810,3 +810,77 @@ def test_ineligible_applications_are_never_queued_by_sync(db, user):
                           job_url="https://x.com/1", match_score=90.0, user_id=user.id,
                           eligible=False, ineligible_reason="will not sponsor")
     assert db.queue_ready_applications(user.id, threshold=70.0) == 0
+
+
+# ---------------- daily top-up ----------------
+
+
+def _topup_user(db, hour_offset=0):
+    """A user whose local clock has just passed their top-up hour."""
+    from datetime import datetime, timezone as tz
+
+    user = db.create_user("topup@example.com", "$argon2id$fake")
+    utc_hour = datetime.now(tz.utc).hour
+    # Shift local time to 12:00 so the hour can be set either side of it.
+    db.update_user(user.id, topup_enabled=True, timezone="UTC",
+                   notify_utc_offset_minutes=0, topup_hour=(utc_hour + hour_offset) % 24)
+    return db.get_user(user.id)
+
+
+def test_a_topup_is_due_once_its_hour_has_passed(db):
+    user = _topup_user(db, hour_offset=0)
+    assert db.users_due_for_topup() == [user.id]
+
+
+def test_a_topup_is_not_due_before_its_hour(db):
+    from datetime import datetime, timezone as tz
+
+    user = db.create_user("later@example.com", "$argon2id$fake")
+    db.update_user(user.id, topup_enabled=True, timezone="UTC",
+                   topup_hour=(datetime.now(tz.utc).hour + 2) % 24)
+    if datetime.now(tz.utc).hour + 2 <= 23:      # skip when the shift wraps midnight
+        assert db.users_due_for_topup() == []
+
+
+def test_a_topup_runs_once_per_day(db):
+    user = _topup_user(db)
+    assert db.users_due_for_topup() == [user.id]
+    db.mark_topup_run(user.id)
+    assert db.users_due_for_topup() == []
+
+
+def test_a_disabled_topup_never_fires(db):
+    user = _topup_user(db)
+    db.update_user(user.id, topup_enabled=False)
+    assert db.users_due_for_topup() == []
+
+
+def test_the_topup_hour_is_read_in_the_users_timezone(db):
+    """3am means 3am where the user is, not on the server."""
+    from datetime import datetime, timezone as tz
+
+    user = db.create_user("pacific@example.com", "$argon2id$fake")
+    utc_hour = datetime.now(tz.utc).hour
+    pacific_hour = (utc_hour - 7) % 24
+    db.update_user(user.id, topup_enabled=True, timezone="America/Los_Angeles",
+                   topup_hour=pacific_hour)
+
+    # Due in Pacific; the same hour set against UTC would usually not be.
+    assert user.id in db.users_due_for_topup()
+
+
+def test_the_topup_does_nothing_when_the_target_is_already_met(db, user, monkeypatch):
+    from web.runner import run_topup_job
+
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 2)
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    for i in range(2):
+        db.create_application(company=f"Co{i}", role_title="Java Engineer",
+                              job_url=f"https://x.com/{i}", match_score=85.0,
+                              user_id=user.id)
+
+    job = db.enqueue_job(user.id, kind="topup")
+    run_topup_job(db, job.id, user.id, gatekeeper=None)
+
+    assert "nothing to top up" in db.get_job(job.id).message
+    assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []

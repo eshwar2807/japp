@@ -60,6 +60,27 @@
 </div>
 
 <div class="card">
+  <h2>Daily top-up</h2>
+  <p class="sub">Each morning, reads {{ topup_companies }} job boards directly and
+    screens whatever passes your filters until {{ daily_target }} applications are
+    ready again. Boards are free to read, so only postings that survive the
+    filters cost anything.</p>
+  <form method="post" action="/settings/topup" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="check mb-4">
+      <input type="checkbox" name="topup_enabled" {{ 'checked' if user.topup_enabled }}>
+      Top up automatically every morning
+    </label>
+    <div class="field"><label for="topup_hour">Hour ({{ tz_abbr }})</label>
+      <input id="topup_hour" type="number" name="topup_hour" min="0" max="23"
+             value="{{ user.topup_hour }}">
+      <p class="hint">Your local time. Last run:
+        {{ user.last_topup_at|when if user.last_topup_at else 'never' }}</p></div>
+    <button type="submit">Save schedule</button>
+  </form>
+</div>
+
+<div class="card">
   <h2>Display timezone</h2>
   <p class="sub">Everything is stored in UTC and shown in your zone. Currently
     <strong>{{ tz_name }}</strong> ({{ tz_abbr }}).</p>
