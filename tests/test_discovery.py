@@ -13,7 +13,14 @@ from types import SimpleNamespace
 import pytest
 
 from config import settings
-from engine.boards import Posting, dedupe, detect_board, location_allowed, matches
+from engine.boards import (
+    BoardError,
+    Posting,
+    dedupe,
+    detect_board,
+    location_allowed,
+    matches,
+)
 from engine.discovery import (
     CompanySearchResult,
     CompanySuggestion,
@@ -152,7 +159,9 @@ def test_postings_come_from_the_board_not_the_model(monkeypatch):
         return [posting(title="Senior Backend Engineer"),
                 posting(title="Office Manager", external_id="2")]
 
-    monkeypatch.setattr("engine.discovery.fetch_board", fake_fetch)
+    monkeypatch.setattr("engine.discovery.resolve_board",
+                        lambda company, url="", slug="": ("greenhouse", "acme",
+                                                          fake_fetch("greenhouse", "acme")))
     engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
 
     postings, problems = engine.collect_postings(
@@ -166,6 +175,8 @@ def test_postings_come_from_the_board_not_the_model(monkeypatch):
 
 def test_a_company_with_no_readable_board_is_reported_not_dropped_silently(monkeypatch):
     engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
+    monkeypatch.setattr("engine.discovery.resolve_board",
+                        lambda company, url="", slug="": None)
     postings, problems = engine.collect_postings(
         [CompanySuggestion(name="Mystery Co", careers_url="https://mystery.com/jobs")],
         DiscoveryCriteria(),
@@ -182,7 +193,15 @@ def test_a_failing_board_does_not_abort_the_whole_run(monkeypatch):
             raise BoardError("HTTP 404")
         return [posting(company=slug)]
 
-    monkeypatch.setattr("engine.discovery.fetch_board", flaky)
+    def fake_resolve(company, url="", slug=""):
+        detected = detect_board(url)
+        target = detected[1] if detected else ""
+        try:
+            return ("greenhouse", target, flaky("greenhouse", target))
+        except BoardError:
+            return None
+
+    monkeypatch.setattr("engine.discovery.resolve_board", fake_resolve)
     engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
     postings, problems = engine.collect_postings([
         CompanySuggestion(name="Broken", careers_url="https://boards.greenhouse.io/broken"),
@@ -193,8 +212,10 @@ def test_a_failing_board_does_not_abort_the_whole_run(monkeypatch):
 
 
 def test_max_postings_is_enforced(monkeypatch):
-    monkeypatch.setattr("engine.discovery.fetch_board",
-                        lambda b, s: [posting(external_id=str(i)) for i in range(50)])
+    monkeypatch.setattr(
+        "engine.discovery.resolve_board",
+        lambda company, url="", slug="": (
+            "greenhouse", "acme", [posting(external_id=str(i)) for i in range(50)]))
     engine = DiscoveryEngine(client=StubMessages(CompanySearchResult()))
     postings, _ = engine.collect_postings(
         [CompanySuggestion(name="Acme", careers_url="https://boards.greenhouse.io/acme")],
@@ -677,3 +698,115 @@ def test_tailoring_stops_once_the_application_cap_is_reached(db, user, monkeypat
     assert "target already met" in db.get_job(job.id).message.lower()
     # No third application was created.
     assert db.applications_today(user.id) == 2
+
+
+# ---------------- board resolution ----------------
+#
+# Eight discovery runs each reported "0 postings queued". The model guesses a
+# company's board slug and provider, and gets the provider wrong often: whole
+# live boards were discarded as 404s for being offered as Greenhouse when they
+# were on Ashby.
+
+
+def test_slug_candidates_handle_real_company_names():
+    from engine.boards import slug_candidates
+
+    assert "globalhealthcareexchange" in slug_candidates("Global Healthcare Exchange")
+    assert "doordash" in slug_candidates("DoorDash")
+    # Legal suffixes are sometimes kept in the slug and sometimes dropped.
+    interactive = slug_candidates("Interactive Brokers, Inc.")
+    assert any("interactivebrokers" in c for c in interactive)
+
+
+def test_resolution_tries_the_same_slug_on_every_provider(monkeypatch):
+    """The slug is usually right and the provider usually wrong."""
+    from engine import boards
+
+    tried = []
+
+    def fake_fetch(provider, slug):
+        tried.append((provider, slug))
+        if provider == "ashby" and slug == "confluent":
+            return [Posting(company="Confluent", title="Java Engineer",
+                            url="https://jobs.ashbyhq.com/confluent/1")]
+        raise boards.BoardError("HTTP 404")
+
+    monkeypatch.setattr(boards, "fetch_board", fake_fetch)
+    result = boards.resolve_board("Confluent", "https://boards.greenhouse.io/confluent")
+
+    assert result is not None
+    provider, slug, postings = result
+    assert (provider, slug) == ("ashby", "confluent")
+    assert ("greenhouse", "confluent") in tried      # the hint was tried first
+    assert len(postings) == 1
+
+
+def test_resolution_falls_back_to_names_derived_from_the_company(monkeypatch):
+    from engine import boards
+
+    def fake_fetch(provider, slug):
+        if slug == "globalhealthcareexchange":
+            return [Posting(company="GHX", title="Java Engineer", url="u")]
+        raise boards.BoardError("HTTP 404")
+
+    monkeypatch.setattr(boards, "fetch_board", fake_fetch)
+    result = boards.resolve_board("Global Healthcare Exchange", "https://ghx.com/careers")
+
+    assert result is not None and result[1] == "globalhealthcareexchange"
+
+
+def test_resolution_gives_up_rather_than_looping(monkeypatch):
+    from engine import boards
+
+    calls = []
+
+    def always_404(provider, slug):
+        calls.append((provider, slug))
+        raise boards.BoardError("HTTP 404")
+
+    monkeypatch.setattr(boards, "fetch_board", always_404)
+    assert boards.resolve_board("Nonexistent Co", "https://x.com/careers") is None
+    # Each provider/slug pair is attempted at most once.
+    assert len(calls) == len(set(calls))
+
+
+def test_an_empty_board_is_not_treated_as_resolved(monkeypatch):
+    """A board that answers with no postings is not the company's board."""
+    from engine import boards
+
+    monkeypatch.setattr(boards, "fetch_board", lambda p, s: [])
+    assert boards.resolve_board("Ghost Co", "https://boards.greenhouse.io/ghost") is None
+
+
+# ---------------- queueing what is ready ----------------
+
+
+def test_lowering_the_threshold_queues_already_tailored_applications(db, user):
+    """An application is auto-queued only when tailored. Lowering the bar
+    afterwards left three eligible and two queued."""
+    from config import settings as cfg
+
+    db.create_application(company="Toast", role_title="Senior Java Engineer",
+                          job_url="https://x.com/1", match_score=73.1, user_id=user.id)
+    db.create_application(company="Low", role_title="Java Engineer",
+                          job_url="https://x.com/2", match_score=52.0, user_id=user.id)
+
+    queued = db.queue_ready_applications(user.id, threshold=70.0)
+    assert queued == 1
+
+    apply_jobs = [j for j in db.list_jobs(user_id=user.id) if j.kind == "apply"]
+    assert len(apply_jobs) == 1
+
+
+def test_syncing_twice_does_not_duplicate(db, user):
+    db.create_application(company="Toast", role_title="Senior Java Engineer",
+                          job_url="https://x.com/1", match_score=73.1, user_id=user.id)
+    assert db.queue_ready_applications(user.id, threshold=70.0) == 1
+    assert db.queue_ready_applications(user.id, threshold=70.0) == 0
+
+
+def test_ineligible_applications_are_never_queued_by_sync(db, user):
+    db.create_application(company="Branch", role_title="Senior Engineer",
+                          job_url="https://x.com/1", match_score=90.0, user_id=user.id,
+                          eligible=False, ineligible_reason="will not sponsor")
+    assert db.queue_ready_applications(user.id, threshold=70.0) == 0

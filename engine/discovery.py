@@ -29,6 +29,7 @@ from engine.boards import (
     detect_board,
     fetch_board,
     matches,
+    resolve_board,
 )
 
 log = logging.getLogger(__name__)
@@ -262,16 +263,15 @@ class DiscoveryEngine:
         problems: list[str] = []
 
         for company in companies:
-            resolved = company.resolve()
+            # The model guesses both slug and provider, and gets the provider
+            # wrong often enough to matter: whole boards were discarded as 404s
+            # for being offered as Greenhouse when they are on Ashby.
+            resolved = resolve_board(company.name, company.careers_url,
+                                     company.board_slug)
             if resolved is None:
-                problems.append(f"{company.name}: no readable board URL")
+                problems.append(f"{company.name}: no board found on any provider")
                 continue
-            board, slug = resolved
-            try:
-                postings = fetch_board(board, slug)
-            except BoardError as exc:
-                problems.append(f"{company.name} ({board}/{slug}): {exc}")
-                continue
+            board, slug, postings = resolved
 
             kept = [
                 p for p in postings

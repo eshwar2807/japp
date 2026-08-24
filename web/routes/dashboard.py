@@ -495,6 +495,17 @@ def cancel_job(request: Request, user: CurrentUser, db: Database, job_id: int,
     return _redirect("/queue", ok=f"Job #{job_id} cancelled.")
 
 
+@router.post("/queue/sync-ready")
+def sync_ready(request: Request, user: CurrentUser, db: Database,
+               _csrf: None = CSRFProtected):
+    """Queue anything eligible that has no apply job yet."""
+    queued = db.queue_ready_applications(user.id)
+    if not queued:
+        return _redirect("/queue", ok="Everything eligible is already queued.")
+    db.log_event(user.id, "sync_ready", f"Queued {queued} eligible application(s)")
+    return _redirect("/queue", ok=f"Queued {queued} eligible application(s).")
+
+
 @router.post("/queue/clear-finished")
 def clear_finished(request: Request, user: CurrentUser, db: Database,
                    _csrf: None = CSRFProtected):

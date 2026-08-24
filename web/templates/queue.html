@@ -7,6 +7,10 @@
       next one starts. Blocks pile up here for you to clear in one sitting.</p></div>
   <div class="actions-row">
     <a class="btn btn-ghost btn-sm" href="/applications">Queue more</a>
+    <form method="post" action="/queue/sync-ready">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn-ghost btn-sm" type="submit">Queue everything ready</button>
+    </form>
     {% if summary.Done or summary.Failed or summary.Cancelled %}
     <form method="post" action="/queue/clear-finished">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

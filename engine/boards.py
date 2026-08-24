@@ -173,6 +173,87 @@ def fetch_board(board: str, slug: str) -> list[Posting]:
     return fetcher(slug)
 
 
+def slug_candidates(company: str) -> list[str]:
+    """Plausible board slugs for a company name, most likely first.
+
+    Boards use a company's own shorthand, which is rarely its display name:
+    "Global Healthcare Exchange" is `globalhealthcareexchangeinc`, and legal
+    suffixes are sometimes kept and sometimes dropped.
+    """
+    name = (company or "").strip().lower()
+    if not name:
+        return []
+
+    cleaned = re.sub(r"[^a-z0-9\s-]+", "", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    without_suffix = re.sub(
+        r"\b(inc|llc|ltd|corp|corporation|company|co|technologies|technology|"
+        r"labs|group|holdings|systems|software|solutions)\b", " ", cleaned
+    ).strip()
+    without_suffix = re.sub(r"\s+", " ", without_suffix)
+
+    candidates = []
+    for base in (cleaned, without_suffix):
+        if not base:
+            continue
+        candidates.extend([
+            base.replace(" ", ""),
+            base.replace(" ", "-"),
+            base.split(" ")[0],
+            base.replace(" ", "") + "inc",
+        ])
+    # Preserve order, drop duplicates and anything implausibly short.
+    seen, out = set(), []
+    for candidate in candidates:
+        if len(candidate) > 2 and candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+    return out
+
+
+def resolve_board(company: str, hinted_url: str = "",
+                  hinted_slug: str = "") -> tuple[str, str, list[Posting]] | None:
+    """Find a company's real board by trying candidates until one answers.
+
+    A model asked for a board URL guesses both the slug and the provider, and
+    gets the provider wrong often: Confluent and Instructure were both offered
+    as Greenhouse when they are on Ashby, so both were discarded as 404s
+    despite having live boards. The slug is usually right, so the same slug is
+    tried on every provider before the company is given up on.
+
+    Returns (provider, slug, postings) or None.
+    """
+    attempts: list[tuple[str, str]] = []
+
+    detected = detect_board(hinted_url)
+    if detected:
+        attempts.append(detected)
+        # Same slug, other providers - this is the common failure.
+        attempts.extend((name, detected[1]) for name in FETCHERS if name != detected[0])
+
+    if hinted_slug:
+        attempts.extend((name, hinted_slug.strip().lower()) for name in FETCHERS)
+
+    for candidate in slug_candidates(company):
+        attempts.extend((name, candidate) for name in FETCHERS)
+
+    tried: set[tuple[str, str]] = set()
+    for provider, slug in attempts:
+        key = (provider, slug)
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            postings = fetch_board(provider, slug)
+        except BoardError:
+            continue
+        if postings:
+            log.info("Resolved %s to %s/%s (%d postings)",
+                     company, provider, slug, len(postings))
+            return provider, slug, postings
+    return None
+
+
 def fetch_any(url_or_slug: str) -> list[Posting]:
     """Fetch from a careers URL, or try each board for a bare company slug."""
     detected = detect_board(url_or_slug)

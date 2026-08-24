@@ -1406,3 +1406,29 @@ class DBManager:
                 )
                 or 0
             )
+
+    def queue_ready_applications(self, user_id: int, threshold: float | None = None) -> int:
+        """Queue apply jobs for eligible applications that lack one.
+
+        Needed because an application is only auto-queued at the moment it is
+        tailored. Lowering the threshold afterwards left already-tailored
+        applications eligible but unqueued, so the dashboard reported three
+        ready while two were queued.
+        """
+        from config import settings as _settings
+
+        if threshold is None:
+            threshold = _settings.ELIGIBLE_MATCH_THRESHOLD
+
+        queued = 0
+        for app in self.list_applications(user_id=user_id, limit=500):
+            if not app.eligible or app.match_score < threshold:
+                continue
+            if app.status is not ApplicationStatus.DRAFT:
+                continue
+            if self.has_pending_apply_job(app.id):
+                continue
+            self.enqueue_job(user_id, kind="apply", job_url=app.job_url,
+                             application_id=app.id)
+            queued += 1
+        return queued
