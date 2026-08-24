@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from config import settings
-from engine.boards import Posting, dedupe, detect_board, matches
+from engine.boards import Posting, dedupe, detect_board, location_allowed, matches
 from engine.discovery import (
     CompanySearchResult,
     CompanySuggestion,
@@ -572,3 +572,64 @@ def test_discovery_only_queues_postings_that_could_plausibly_fit(db, user, monke
     queued = [j.job_url for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]
     assert good.url in queued
     assert bad.url not in queued, "a posting with no overlap should not be queued"
+
+
+# ---------------- location filtering ----------------
+#
+# A discovery run targeting the US queued ClickHouse roles in Canada. The
+# filter let any posting through whose location contained the word "remote",
+# so "Remote Canada" satisfied a US-only search. For a candidate whose work
+# authorisation is US-only, that is not a near miss.
+
+US_SEARCH = ["remote", "united states", "ohio"]
+
+
+def _at(location):
+    return Posting(company="X", title="Senior Backend Engineer",
+                   url="https://boards.greenhouse.io/x/jobs/1", location=location)
+
+
+@pytest.mark.parametrize("location", [
+    "Remote Canada", "Toronto, Canada", "Remote India", "Bengaluru, India",
+    "Berlin, Germany", "Paris, France", "London, UK", "Belgrade, Serbia",
+    "Remote EMEA", "Sydney, Australia", "Sao Paulo, Brazil",
+])
+def test_a_us_search_rejects_other_countries_even_when_remote(location):
+    assert matches(_at(location), ["backend"], US_SEARCH, []) is False
+
+
+@pytest.mark.parametrize("location", [
+    "Remote US", "Remote - United States", "United States", "Columbus, Ohio",
+    "New York, NY", "San Francisco, California", "Austin, TX",
+])
+def test_a_us_search_accepts_us_locations(location):
+    assert matches(_at(location), ["backend"], US_SEARCH, []) is True
+
+
+def test_a_city_outside_the_requested_state_is_still_accepted():
+    """Country is the filter that matters. Rejecting a New York role because
+    the search said Ohio would discard viable work, and relocation is a
+    question the application itself asks."""
+    assert matches(_at("New York, NY"), ["backend"], ["ohio"], []) is True
+
+
+@pytest.mark.parametrize("location", ["Remote", "Hybrid", "", "Flexible"])
+def test_a_posting_naming_no_country_is_not_excluded(location):
+    """Ambiguous is not disqualifying: better to tailor one extra than to miss
+    a real role because the board was vague."""
+    assert matches(_at(location), ["backend"], US_SEARCH, []) is True
+
+
+def test_a_multi_country_posting_including_the_us_is_accepted():
+    assert matches(_at("US or Canada"), ["backend"], US_SEARCH, []) is True
+
+
+def test_the_filter_is_not_us_specific():
+    canada = ["remote", "canada"]
+    assert matches(_at("Toronto, Canada"), ["backend"], canada, []) is True
+    assert matches(_at("Remote Canada"), ["backend"], canada, []) is True
+    assert matches(_at("Remote US"), ["backend"], canada, []) is False
+
+
+def test_no_location_filter_accepts_anything():
+    assert matches(_at("Remote Canada"), ["backend"], [], []) is True

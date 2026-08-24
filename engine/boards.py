@@ -199,6 +199,94 @@ def fetch_any(url_or_slug: str) -> list[Posting]:
 # --------------------------------------------------------------------------
 
 
+#: Countries other than the United States, as they appear in board locations.
+_NON_US_COUNTRIES = {
+    "canada": r"\b(canada|canadian|toronto|vancouver|montreal|ottawa|calgary)\b",
+    "united kingdom": r"\b(united kingdom|\buk\b|england|scotland|wales|london|manchester)\b",
+    "ireland": r"\b(ireland|dublin, ireland|irish)\b",
+    "india": r"\b(india|bengaluru|bangalore|hyderabad|pune|mumbai|chennai|gurgaon|noida)\b",
+    "germany": r"\b(germany|german|berlin|munich|hamburg|frankfurt)\b",
+    "france": r"\b(france|french|paris|bordeaux|lyon)\b",
+    "netherlands": r"\b(netherlands|amsterdam|dutch)\b",
+    "spain": r"\b(spain|madrid|barcelona)\b",
+    "portugal": r"\b(portugal|lisbon|porto)\b",
+    "poland": r"\b(poland|warsaw|krakow)\b",
+    "serbia": r"\b(serbia|belgrade)\b",
+    "australia": r"\b(australia|sydney|melbourne)\b",
+    "new zealand": r"\b(new zealand|auckland)\b",
+    "singapore": r"\bsingapore\b",
+    "japan": r"\b(japan|tokyo)\b",
+    "china": r"\b(china|beijing|shanghai|shenzhen)\b",
+    "hong kong": r"\bhong kong\b",
+    "brazil": r"\b(brazil|brasil|sao paulo|s.o paulo)\b",
+    "mexico": r"\b(mexico|guadalajara|monterrey)\b",
+    "argentina": r"\b(argentina|buenos aires)\b",
+    "colombia": r"\b(colombia|bogota|medellin)\b",
+    "costa rica": r"\bcosta rica\b",
+    "israel": r"\b(israel|tel aviv)\b",
+    "switzerland": r"\b(switzerland|zurich|geneva)\b",
+    "sweden": r"\b(sweden|stockholm)\b",
+    "romania": r"\b(romania|bucharest)\b",
+    "ukraine": r"\b(ukraine|kyiv|kiev)\b",
+    "philippines": r"\b(philippines|manila)\b",
+    "emea": r"\b(emea|apac|latam)\b",
+}
+
+_US_MARKER = re.compile(
+    r"\b(us|usa|u\.s\.?a?\.?|united states|america|american|"
+    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|"
+    r"florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|"
+    r"louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|"
+    r"missouri|montana|nebraska|nevada|hampshire|jersey|mexico\b(?! city)|"
+    r"new york|carolina|dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|"
+    r"tennessee|texas|utah|vermont|virginia|washington|wisconsin|wyoming|"
+    r"nyc|sf|bay area|silicon valley)\b",
+    re.IGNORECASE,
+)
+
+
+def countries_named(location: str) -> set[str]:
+    """Non-US countries this location string mentions."""
+    text = (location or "").lower()
+    return {name for name, pattern in _NON_US_COUNTRIES.items()
+            if re.search(pattern, text, re.IGNORECASE)}
+
+
+def location_allowed(posting_location: str, requested: Iterable[str]) -> bool:
+    """Is this posting in a place the search asked for?
+
+    "Remote" is not a country. A posting reading "Remote Canada" satisfied a
+    US-only search purely because it contained the word remote, which is how a
+    Canadian role reached a candidate who needs US authorisation.
+    """
+    terms = [t.strip().lower() for t in requested if t and t.strip()]
+    if not terms:
+        return True
+
+    where = (posting_location or "").lower()
+    wants_us = any(_US_MARKER.search(term) for term in terms)
+    wanted_countries = set()
+    for term in terms:
+        wanted_countries |= countries_named(term)
+
+    # A posting open to several countries including the requested one is
+    # usable: "US or Canada" is fine for a US-authorised candidate.
+    if wants_us and _US_MARKER.search(where):
+        return True
+
+    posting_countries = countries_named(where)
+    if posting_countries:
+        # Named somewhere specific: it must be somewhere that was asked for.
+        return bool(posting_countries & wanted_countries)
+
+    if _US_MARKER.search(where):
+        return wants_us or not wanted_countries
+
+    # No country named at all - a bare "Remote" or "Hybrid". Allow it only if
+    # the search did not restrict to a country other than the US.
+    return True
+
+
 def matches(
     posting: Posting,
     titles: Iterable[str] = (),
@@ -216,10 +304,12 @@ def matches(
     if title_terms and not any(term in title for term in title_terms):
         return False
 
-    location_terms = [loc.lower() for loc in locations if loc]
-    if location_terms and not any(
-        term in where or term in title or "remote" in where for term in location_terms
-    ):
+    # Country is the filter that matters: a role in the wrong country is
+    # unusable regardless of how well it fits. City-level filtering is
+    # deliberately not enforced - rejecting a New York role because the search
+    # said Ohio would discard genuinely viable work, and relocation is a
+    # question the application itself asks.
+    if not location_allowed(posting.location, locations):
         return False
     return True
 
