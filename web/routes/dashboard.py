@@ -48,6 +48,10 @@ def render(request: Request, template: str, user, db, **context) -> HTMLResponse
     base = {
         "tz_name": zone,
         "tz_abbr": abbreviation(zone),
+        # Every view marks a score against the same configured bar. Templates
+        # carrying their own number is how the list stayed green only above
+        # 80% after the threshold moved to 70%.
+        "eligible_threshold": settings.ELIGIBLE_MATCH_THRESHOLD,
         "user": user,
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "open_actions": db.count_open_actions(user.id) if user else 0,

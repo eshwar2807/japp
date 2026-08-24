@@ -39,7 +39,7 @@
       <td class="mono">{{ app.id }}</td>
       <td><a href="/applications/{{ app.id }}">{{ app.company }}</a></td>
       <td>{{ app.role_title }}</td>
-      <td><span class="pill {{ 'pill-good' if app.match_score >= 80 else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
+      <td><span class="pill {{ 'pill-good' if app.match_score >= eligible_threshold else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
       <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
       <td class="muted">{{ app.created_at|day }}</td>
       <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>

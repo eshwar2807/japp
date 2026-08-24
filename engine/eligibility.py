@@ -159,6 +159,66 @@ def refuses_sponsorship(description: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Reserved postings
+# --------------------------------------------------------------------------
+
+#: Postings open only to a specific group. Common in India and Brazil, and
+#: appearing in US diversity programmes: the role is genuinely restricted, so
+#: applying wastes everyone's time.
+_RESERVED_FOR = re.compile(
+    r"("
+    r"(?:exclusively|only|reserved|restricted|earmarked)\s+(?:open\s+)?"
+    r"(?:for|to)\s+(?:persons?|people|candidates?|applicants?|individuals?)\s+"
+    r"with\s+(?:a\s+)?disabilit\w+"
+    r"|(?:persons?|people|candidates?|applicants?)\s+with\s+disabilit\w+\s+"
+    r"(?:only|are\s+encouraged\s+to\s+apply\s+exclusively)"
+    r"|\bpwd\s+(?:only|candidates?\s+only|position|vacancy|role)\b"
+    r"|\bonly\s+pwd\b"
+    r"|this\s+(?:position|role|vacancy|opening)\s+is\s+(?:reserved|exclusive|"
+    r"restricted|only\s+open)\s+(?:for|to)\s+"
+    r"(?:persons?|people|candidates?)?\s*with\s+disabilit\w+"
+    r"|vaga\s+exclusiva\s+para\s+pcd"
+    r"|posi..o\s+exclusiva\s+para\s+pessoas\s+com\s+defici.ncia"
+    r")",
+    re.IGNORECASE,
+)
+
+#: Equal-opportunity boilerplate. Appears on almost every posting and says the
+#: opposite: the role is open to everyone. Matching this would reject the
+#: entire market, so it is checked first and wins.
+_EEO_BOILERPLATE = re.compile(
+    r"(equal\s+opportunity|do\s+not\s+discriminate|without\s+regard\s+to|"
+    r"regardless\s+of\s+.{0,60}disabilit|reasonable\s+accommodation|"
+    r"encourage\s+(?:applications|candidates)\s+from\s+all|"
+    r"affirmative\s+action|protected\s+veteran)",
+    re.IGNORECASE,
+)
+
+
+def reserved_for_other_group(description: str) -> str:
+    """Is this posting restricted to a group the candidate is not in?
+
+    Deliberately narrow. Nearly every posting mentions disability in its equal
+    opportunity statement, and treating that as a restriction would reject the
+    whole market. Only explicit reservation language counts, and only when the
+    surrounding sentence is not boilerplate.
+    """
+    text = description or ""
+    match = _RESERVED_FOR.search(text)
+    if not match:
+        return ""
+
+    # The sentence around the match decides it: "we do not discriminate on the
+    # basis of disability" must never read as "reserved for candidates with
+    # disabilities".
+    start = max(match.start() - 160, 0)
+    end = min(match.end() + 160, len(text))
+    if _EEO_BOILERPLATE.search(text[start:end]):
+        return ""
+    return match.group(0).strip()[:80]
+
+
+# --------------------------------------------------------------------------
 # Combined
 # --------------------------------------------------------------------------
 
@@ -193,5 +253,9 @@ def assess(
 
     if needs_sponsorship and refuses_sponsorship(description):
         result.reject("employer states they will not sponsor")
+
+    reserved = reserved_for_other_group(description)
+    if reserved:
+        result.reject(f"reserved for a specific group ({reserved})")
 
     return result

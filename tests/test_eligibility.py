@@ -192,3 +192,63 @@ def test_every_failing_reason_is_reported_not_just_the_first():
     )
     assert verdict.eligible is False
     assert len(verdict.reasons) == 5
+
+
+# ---------------- postings reserved for another group ----------------
+#
+# Some employers post roles open only to persons with disabilities. Those are
+# genuinely restricted and applying wastes everyone's time. The difficulty is
+# that nearly every posting mentions disability in its equal-opportunity
+# statement, and reading that as a restriction would reject the whole market.
+
+
+@pytest.mark.parametrize("text", [
+    "This position is reserved for persons with disabilities.",
+    "PWD only. Candidates must hold a valid disability certificate.",
+    "This role is exclusively for candidates with disabilities.",
+    "Open only to persons with disabilities.",
+    "This vacancy is restricted to people with disabilities.",
+    "Vaga exclusiva para PcD",
+])
+def test_genuinely_reserved_postings_are_detected(text):
+    from engine.eligibility import reserved_for_other_group
+
+    assert reserved_for_other_group(text) != ""
+
+
+@pytest.mark.parametrize("text", [
+    "We are an equal opportunity employer and do not discriminate on the basis "
+    "of race, religion, gender, or disability.",
+    "Qualified applicants receive consideration without regard to disability status.",
+    "We provide reasonable accommodation to individuals with disabilities during "
+    "the interview process.",
+    "We encourage applications from all backgrounds, including people with disabilities.",
+    "EEO/AA employer: minorities, women, protected veterans, individuals with disabilities.",
+    "Affirmative action employer. All applicants with disabilities are welcome to apply.",
+])
+def test_equal_opportunity_boilerplate_is_not_a_restriction(text):
+    """This appears on almost every posting and says the opposite."""
+    from engine.eligibility import reserved_for_other_group
+
+    assert reserved_for_other_group(text) == ""
+
+
+def test_a_reserved_posting_is_rejected_by_assess():
+    verdict = assess(
+        "Senior Java Developer",
+        "Java Spring Boot microservices. 4+ years. This position is reserved "
+        "for persons with disabilities.",
+    )
+    assert verdict.eligible is False
+    assert "reserved" in verdict.reasons[0]
+
+
+def test_an_ordinary_posting_with_an_eeo_statement_still_passes():
+    """The common case: a normal role whose footer mentions disability."""
+    verdict = assess(
+        "Senior Java Developer",
+        "Java Spring Boot microservices. 4+ years of experience. Remote US. "
+        "We are an equal opportunity employer and do not discriminate on the "
+        "basis of race, gender, age, or disability status.",
+    )
+    assert verdict.eligible is True

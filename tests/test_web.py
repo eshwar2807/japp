@@ -8,6 +8,7 @@ tested by trying to defeat it.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1217,3 +1218,31 @@ def test_the_daily_target_is_shown_as_ready_to_apply_not_tailored(web):
     assert "3/20" in page                 # three at or above 70%
     assert "6 tailored" in page           # all six still reported
     assert "Tailored today" not in page
+
+
+def test_no_template_hardcodes_the_match_threshold(web):
+    """The list stayed green only above 80% after the bar moved to 70%,
+    because two templates carried their own copy of the number."""
+    import re
+    from pathlib import Path
+
+    templates = Path(__file__).resolve().parent.parent / "web/templates"
+    offenders = []
+    for path in templates.glob("*.html"):
+        text = path.read_text()
+        if re.search(r"match_score\s*>=\s*\d", text):
+            offenders.append(path.name)
+    assert offenders == [], f"hardcoded threshold in: {offenders}"
+
+
+def test_scores_are_marked_against_the_configured_threshold(web, monkeypatch):
+    monkeypatch.setattr(settings, "ELIGIBLE_MATCH_THRESHOLD", 70.0)
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.create_application(company="Toast", role_title="Java Engineer",
+                              job_url="https://x.com/1", match_score=73.0,
+                              user_id=user.id)
+
+    page = web.get("/applications").text
+    # 73% sits above the 70% bar, so it must render as a pass, not a warning.
+    assert re.search(r'pill-good[^>]*>\s*73', page) or "pill-good" in page

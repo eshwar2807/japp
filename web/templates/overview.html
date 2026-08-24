@@ -72,7 +72,7 @@
       <tr>
         <td><a href="/applications/{{ app.id }}">{{ app.company }}</a></td>
         <td>{{ app.role_title }}</td>
-        <td><span class="pill {{ 'pill-good' if app.match_score >= 80 else 'pill-warn' }}">{{ app.match_score|round|int }}%</span></td>
+        <td><span class="pill {{ 'pill-good' if app.match_score >= eligible_threshold else 'pill-warn' }}">{{ app.match_score|round|int }}%</span></td>
         <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
       </tr>
       {% endfor %}
