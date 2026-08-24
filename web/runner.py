@@ -135,6 +135,7 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
             profile.legal.get("requires_sponsorship_now_or_future", "")
         ).strip().lower().startswith("y"),
         can_obtain_clearance=settings.CAN_OBTAIN_CLEARANCE,
+        exclude_above_level=settings.EXCLUDE_ABOVE_LEVEL,
     )
     if not verdict.eligible:
         db.log_event(user_id, "ineligible",

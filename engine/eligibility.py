@@ -116,6 +116,28 @@ def years_required(description: str) -> int | None:
 
 
 # --------------------------------------------------------------------------
+# Seniority
+# --------------------------------------------------------------------------
+
+#: Titles above the target level. Matched on the title only - "staffing" and
+#: "staff members" appear in descriptions and mean something else entirely.
+#: More reliable than parsing years text, which postings write inconsistently:
+#: two Staff roles cleared a six-year ceiling because their requirement was
+#: phrased in a way the year parser did not recognise.
+_ABOVE_LEVEL_TITLE = re.compile(
+    r"\b(staff|principal|distinguished|fellow|architect|"
+    r"director|head\s+of|vp|vice\s+president|chief|manager)\b",
+    re.IGNORECASE,
+)
+
+
+def above_target_level(title: str) -> str:
+    """The seniority marker in a title that puts it above the target, or ""."""
+    match = _ABOVE_LEVEL_TITLE.search(title or "")
+    return match.group(0).strip() if match else ""
+
+
+# --------------------------------------------------------------------------
 # Clearance
 # --------------------------------------------------------------------------
 
@@ -260,12 +282,18 @@ def assess(
     max_years: int | None = 6,
     needs_sponsorship: bool = True,
     can_obtain_clearance: bool = False,
+    exclude_above_level: bool = True,
 ) -> Eligibility:
     """Screen one posting against the candidate's hard constraints."""
     result = Eligibility()
 
     if require_java and not is_java_role(title, description):
         result.reject("not a Java role")
+
+    if exclude_above_level:
+        marker = above_target_level(title)
+        if marker:
+            result.reject(f"title is above the target level ({marker})")
 
     years = years_required(description)
     result.years_required = years

@@ -81,6 +81,9 @@ MAX_YEARS_REQUIRED = int(os.getenv("JP_MAX_YEARS_REQUIRED", "6"))
 # An H-1B holder cannot obtain a US security clearance, and a transfer is
 # sponsorship, so postings ruling either out are closed regardless of fit.
 CAN_OBTAIN_CLEARANCE = os.getenv("JP_CAN_OBTAIN_CLEARANCE", "false").lower() == "true"
+# Drop Staff, Principal and above by title. More reliable than parsing years
+# text, which postings phrase inconsistently.
+EXCLUDE_ABOVE_LEVEL = os.getenv("JP_EXCLUDE_ABOVE_LEVEL", "true").lower() == "true"
 # Postings discovery may queue for screening per day. Deliberately much higher
 # than the application cap: screening a posting that turns out unviable costs
 # one cheap extraction call, and finding twenty matches means looking at far

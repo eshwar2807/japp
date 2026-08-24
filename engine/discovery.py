@@ -242,6 +242,7 @@ class DiscoveryEngine:
                 max_years=_settings.MAX_YEARS_REQUIRED,
                 needs_sponsorship=needs_sponsorship,
                 can_obtain_clearance=_settings.CAN_OBTAIN_CLEARANCE,
+                exclude_above_level=_settings.EXCLUDE_ABOVE_LEVEL,
             )
             if not verdict.eligible:
                 log.info("Skipping %s: %s", posting.title[:40], "; ".join(verdict.reasons))

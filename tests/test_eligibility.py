@@ -276,3 +276,63 @@ def test_an_ordinary_posting_with_an_eeo_statement_still_passes():
         "basis of race, gender, age, or disability status.",
     )
     assert verdict.eligible is True
+
+
+# ---------------- seniority by title ----------------
+#
+# Two Staff roles cleared a six-year ceiling because their requirement was
+# phrased in a way the year parser did not recognise. The title is a more
+# reliable signal than years text, which postings write inconsistently.
+
+
+@pytest.mark.parametrize("title", [
+    "Staff Software Engineer",
+    "Senior Staff Software Engineer",
+    "Principal Engineer",
+    "Distinguished Engineer",
+    "Software Architect",
+    "Engineering Manager",
+    "Director of Engineering",
+    "Head of Platform",
+])
+def test_titles_above_the_target_level_are_rejected(title):
+    from engine.eligibility import above_target_level
+
+    assert above_target_level(title) != ""
+
+
+@pytest.mark.parametrize("title", [
+    "Senior Software Engineer",
+    "Java Developer",
+    "Senior Backend Engineer",
+    "Software Engineer II",
+    "Senior Full Stack Developer",
+    "SDE1 Back-End Engineer",
+    "Backend Engineer, Payments",
+])
+def test_target_level_titles_are_kept(title):
+    from engine.eligibility import above_target_level
+
+    assert above_target_level(title) == ""
+
+
+def test_staff_in_the_description_does_not_reject_a_senior_role():
+    """"staffing" and "staff members" appear in descriptions and mean
+    something else entirely; only the title is checked."""
+    verdict = assess(
+        "Senior Java Engineer",
+        "Java Spring Boot. 4+ years. You will work with our staff across teams "
+        "and partner with staffing to grow the group.",
+    )
+    assert verdict.eligible is True
+
+
+def test_a_staff_role_is_rejected_by_title_even_without_a_years_statement():
+    verdict = assess("Staff Software Engineer", "Java Spring Boot microservices.")
+    assert verdict.eligible is False
+    assert "above the target level" in verdict.reasons[0]
+
+
+def test_the_seniority_filter_can_be_turned_off():
+    assert assess("Staff Software Engineer", "Java Spring Boot.",
+                  exclude_above_level=False).eligible is True
