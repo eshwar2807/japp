@@ -15,6 +15,9 @@ os.environ.setdefault("JP_OUTPUT_DIR", str(_TMP / "output"))
 os.environ.setdefault("JP_DB_PATH", str(_TMP / "data" / "test.db"))
 os.environ.setdefault("JP_DB_URL", f"sqlite:///{_TMP / 'data' / 'test.db'}")
 os.environ.setdefault("JP_KEY_PATH", str(_TMP / "data" / "vault.key"))
+# No test may make a real API call, and none should change behaviour based on
+# whether a key is present in the developer's environment.
+os.environ.pop("ANTHROPIC_API_KEY", None)
 
 import pytest  # noqa: E402
 

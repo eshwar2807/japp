@@ -50,6 +50,9 @@ def web(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "COOKIE_SECURE", False)
     monkeypatch.setattr(settings, "ALLOW_SIGNUP", True)
     monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "out")
+    # Tests must not behave differently because a developer happens to have a
+    # key in their environment: the per-user vault is the only source here.
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", None)
 
     # Same key resolution as the app, so both share one vault.
     db = DBManager(db_url=settings.DB_URL)

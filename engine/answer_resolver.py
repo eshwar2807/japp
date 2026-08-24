@@ -38,6 +38,31 @@ log = logging.getLogger(__name__)
 #: Below this the answer is not used, and the field goes to a human.
 MIN_RESOLVE_CONFIDENCE = 0.75
 
+#: Questions whose answer must be a bare number to be usable on a form.
+_NUMERIC_QUESTION = re.compile(
+    r"how\s+many|number\s+of|years?\s+of|\byears?\b\s*\(|\(years?\)", re.IGNORECASE
+)
+_LEADING_NUMBER = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def wants_a_number(question: str) -> bool:
+    return bool(_NUMERIC_QUESTION.search(question or ""))
+
+
+def coerce_numeric(answer: str) -> str | None:
+    """Reduce a hedged answer to the bare number a form field expects.
+
+    The model returned "Approximately 3" for a years field. A form parses that
+    as text or rejects it, so the number is extracted when there is exactly one
+    and the answer is discarded when there is not.
+    """
+    numbers = _LEADING_NUMBER.findall(answer or "")
+    if len(numbers) != 1:
+        return None
+    value = numbers[0]
+    return value[:-2] if value.endswith(".0") else value
+
+
 #: Questions that must never be answered by inference, whatever the profile
 #: seems to imply. These are legal statements, and the rule table owns them.
 NEVER_INFER = re.compile(
@@ -106,8 +131,10 @@ reused from a previous answer to the same question in different words.
 - Open-ended prompts ("describe a time when...", "why this company") may be \
 composed ONLY from accomplishments already in the profile. If the profile has \
 nothing relevant, say you cannot answer.
-- Match the form's expected format: a number for a years field, Yes/No for a \
-yes/no question, one of the listed options when options are given.
+- Match the form's expected format exactly. A years-of-experience field takes a \
+bare number and nothing else: "4", never "approximately 4", "4 years" or "about \
+four". A yes/no question takes "Yes" or "No". When options are listed, return one \
+of them verbatim. Form fields are parsed by machines, not read by people.
 - `confidence` reflects how directly the facts support the answer: 1.0 for a \
 value copied straight from the profile, lower when composed from several facts."""
 
@@ -206,5 +233,18 @@ class LLMAnswerResolver:
                 log.warning("Discarding inferred answer to a legal question: %s",
                             answer.question[:60])
                 continue
+
+            # A numeric field needs a number, not prose about one.
+            if answer.can_answer and wants_a_number(answer.question):
+                number = coerce_numeric(answer.answer)
+                if number is None:
+                    log.info("Discarding non-numeric answer to %r: %r",
+                             answer.question[:50], answer.answer[:40])
+                    answer = answer.model_copy(update={"can_answer": False, "answer": ""})
+                elif number != answer.answer.strip():
+                    log.info("Reduced %r to %r for a numeric field",
+                             answer.answer[:40], number)
+                    answer = answer.model_copy(update={"answer": number})
+
             resolved[answer.question] = answer
         return resolved

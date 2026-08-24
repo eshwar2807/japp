@@ -266,3 +266,71 @@ def test_a_technology_specific_years_question_uses_a_remembered_answer(prof):
     answer = mapper.map_field(field("Years of experience with Go?"))
     assert answer.source is AnswerSource.MEMORY
     assert answer.value == "4"
+
+
+# ---------------- numeric fields ----------------
+
+
+def test_a_hedged_number_is_reduced_to_the_bare_value(prof):
+    """Live regression: the model answered "Approximately 3" for a years
+    field. A form parses that as text or rejects it."""
+    from engine.answer_resolver import ResolverBatch
+
+    class Hedging:
+        def parse(self, **kwargs):
+            return SimpleNamespace(parsed_output=ResolverBatch(answers=[
+                ResolvedAnswer(question="How many years of Kubernetes experience?",
+                               can_answer=True, answer="Approximately 3",
+                               grounding="Kubernetes since 2021", confidence=0.9)]),
+                stop_reason="end_turn")
+
+    resolved = LLMAnswerResolver(client=Hedging()).resolve(
+        [{"question": "How many years of Kubernetes experience?"}], prof, {})
+    answer = resolved["How many years of Kubernetes experience?"]
+    assert answer.answer == "3"
+    assert answer.usable
+
+
+def test_an_unquantifiable_answer_to_a_numeric_field_escalates(prof):
+    from engine.answer_resolver import ResolverBatch
+
+    class Vague:
+        def parse(self, **kwargs):
+            return SimpleNamespace(parsed_output=ResolverBatch(answers=[
+                ResolvedAnswer(question="How many years of Go experience?",
+                               can_answer=True, answer="between three and five",
+                               grounding="employment dates", confidence=0.9)]),
+                stop_reason="end_turn")
+
+    resolved = LLMAnswerResolver(client=Vague()).resolve(
+        [{"question": "How many years of Go experience?"}], prof, {})
+    assert resolved["How many years of Go experience?"].usable is False
+
+
+def test_prose_answers_are_left_alone(prof):
+    """Only numeric fields get coerced; an essay answer must survive intact."""
+    from engine.answer_resolver import ResolverBatch
+
+    prose = "Four years of Go in production, mostly event pipelines."
+
+    class Prose:
+        def parse(self, **kwargs):
+            return SimpleNamespace(parsed_output=ResolverBatch(answers=[
+                ResolvedAnswer(question="Describe your Go background",
+                               can_answer=True, answer=prose,
+                               grounding="3 Go services", confidence=0.9)]),
+                stop_reason="end_turn")
+
+    resolved = LLMAnswerResolver(client=Prose()).resolve(
+        [{"question": "Describe your Go background"}], prof, {})
+    assert resolved["Describe your Go background"].answer == prose
+
+
+@pytest.mark.parametrize("answer,expected", [
+    ("Approximately 3", "3"), ("4", "4"), ("3 years", "3"), ("4.0", "4"),
+    ("Roughly 7 years", "7"), ("about four", None), ("between 3 and 5", None),
+])
+def test_numeric_coercion_cases(answer, expected):
+    from engine.answer_resolver import coerce_numeric
+
+    assert coerce_numeric(answer) == expected
