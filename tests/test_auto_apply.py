@@ -108,11 +108,22 @@ def test_a_score_exactly_on_the_threshold_queues(db, user, monkeypatch, tmp_path
 
 
 def test_nothing_queues_when_auto_apply_is_off(db, user, monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "AUTO_APPLY_THRESHOLD", 0.0)
-    db.update_user(user.id, auto_apply_threshold=None)
-    _tailor(db, user, 99.0, monkeypatch, tmp_path)
+    """Off is recorded as an explicit 0. None would mean "not configured" and
+    fall back to the default, which would silently re-enable it."""
+    db.update_user(user.id, auto_apply_threshold=0.0)
+    assert db.auto_apply_threshold(user.id) is None
 
+    _tailor(db, user, 99.0, monkeypatch, tmp_path)
     assert _apply_jobs(db, user) == []
+
+
+def test_an_unconfigured_account_uses_the_eligibility_threshold(db, user, monkeypatch):
+    """One bar, not two: what counts as ready is what gets queued."""
+    monkeypatch.setattr(settings, "AUTO_APPLY_THRESHOLD", 0.0)
+    monkeypatch.setattr(settings, "ELIGIBLE_MATCH_THRESHOLD", 70.0)
+    db.update_user(user.id, auto_apply_threshold=None)
+
+    assert db.auto_apply_threshold(user.id) == 70.0
 
 
 def test_a_threshold_of_zero_means_off_not_always(db, user, monkeypatch, tmp_path):
@@ -180,3 +191,35 @@ def test_auto_queued_jobs_are_apply_kind_so_the_server_will_not_run_them(db, use
 
     assert db.claim_next_job(kinds=("tailor", "discover")) is None
     assert db.claim_next_job(kinds=("apply",)) is not None
+
+
+# ---------------- ready means queued ----------------
+
+
+def test_the_ready_count_matches_what_actually_queues(db, user, monkeypatch, tmp_path):
+    """The dashboard reported nine applications ready while two were queued,
+    because eligibility counted at 70% and auto-apply queued at 80%."""
+    monkeypatch.setattr(settings, "ELIGIBLE_MATCH_THRESHOLD", 70.0)
+    monkeypatch.setattr(settings, "AUTO_APPLY_THRESHOLD", 0.0)
+    db.update_user(user.id, auto_apply_threshold=None)
+
+    for i, score in enumerate([90.0, 75.0, 72.0, 65.0]):
+        _tailor(db, user, score, monkeypatch, tmp_path, url=f"https://x.com/j/{i}")
+
+    ready = db.eligible_today(user.id)
+    queued = len(_apply_jobs(db, user))
+    assert ready == queued == 3
+
+
+def test_an_ineligible_application_is_not_counted_as_ready(db, user):
+    """Score alone is not readiness: a role that refuses sponsorship cannot be
+    applied to however well it matches."""
+    db.create_application(company="Branch", role_title="Senior Engineer",
+                          job_url="https://x.com/1", match_score=90.0,
+                          user_id=user.id, eligible=False,
+                          ineligible_reason="employer states they will not sponsor")
+    db.create_application(company="SmithRx", role_title="Senior Java Engineer",
+                          job_url="https://x.com/2", match_score=81.0,
+                          user_id=user.id)
+
+    assert db.eligible_today(user.id) == 1

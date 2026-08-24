@@ -91,6 +91,12 @@ class Application(Base):
     match_score: Mapped[float] = mapped_column(Float, default=0.0)
     #: Salary range the posting stated, if any. Used to answer "desired salary"
     #: per posting rather than with one static number.
+    #: False when the posting fails a hard constraint - not a Java role, over
+    #: the experience ceiling, clearance required, sponsorship refused. Set at
+    #: creation; ineligible postings are normally rejected before they get this
+    #: far, so this exists for rows created before those checks did.
+    eligible: Mapped[bool] = mapped_column(Boolean, default=True)
+    ineligible_reason: Mapped[str] = mapped_column(Text, default="")
     salary_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[ApplicationStatus] = mapped_column(

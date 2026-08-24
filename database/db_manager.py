@@ -259,6 +259,8 @@ class DBManager:
         user_id: int | None = None,
         salary_min: float | None = None,
         salary_max: float | None = None,
+        eligible: bool = True,
+        ineligible_reason: str = "",
     ) -> Application:
         with self.session() as sess:
             app = Application(
@@ -275,6 +277,8 @@ class DBManager:
                 user_id=user_id,
                 salary_min=salary_min,
                 salary_max=salary_max,
+                eligible=eligible,
+                ineligible_reason=ineligible_reason,
             )
             sess.add(app)
             sess.flush()
@@ -1223,6 +1227,7 @@ class DBManager:
                         Application.user_id == user_id,
                         Application.created_at >= start,
                         Application.match_score >= threshold,
+                        Application.eligible.is_(True),
                     )
                 )
                 or 0
@@ -1319,12 +1324,18 @@ class DBManager:
 
         None means off, and every tailored application waits for a click.
         """
-        user = self.get_user(user_id)
-        if user is not None and user.auto_apply_threshold is not None:
-            return float(user.auto_apply_threshold) or None
         from config import settings as _settings
 
-        return float(_settings.AUTO_APPLY_THRESHOLD) or None
+        user = self.get_user(user_id)
+        if user is not None and user.auto_apply_threshold is not None:
+            # An explicit 0 means off. None means "never configured".
+            return float(user.auto_apply_threshold) or None
+
+        # Falls back to the eligibility threshold rather than a second number.
+        # Two separate bars let the dashboard report nine applications ready
+        # while only two were queued, a distinction nobody asked for.
+        configured = float(_settings.AUTO_APPLY_THRESHOLD)
+        return configured or float(_settings.ELIGIBLE_MATCH_THRESHOLD) or None
 
     def submitted_today(self, user_id: int) -> int:
         """Applications actually sent to an employer since midnight UTC.

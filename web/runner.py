@@ -196,6 +196,11 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         salary_min=keywords.salary_min,
         salary_max=keywords.salary_max,
         user_id=user_id,
+        # Recorded rather than re-derived. An ineligible posting is normally
+        # rejected before reaching here, so this stays True in practice - but
+        # the count must never again include rows that cannot be applied to.
+        eligible=verdict.eligible,
+        ineligible_reason="; ".join(verdict.reasons),
     )
     application_ref[0] = application.id
 

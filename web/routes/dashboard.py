@@ -698,7 +698,9 @@ def save_automation(request: Request, user: CurrentUser, db: Database,
                     daily_spend_cap_usd: str = Form(""),
                     _csrf: None = CSRFProtected):
     enabled = str(auto_apply_enabled).lower() in ("on", "true", "1")
-    threshold = None
+    # 0 records "deliberately off". Writing None would mean "not configured",
+    # which falls back to the default and silently re-enables it.
+    threshold = 0.0
     if enabled:
         try:
             threshold = float(auto_apply_threshold)
