@@ -342,7 +342,15 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     )
     db.log_event(user_id, "discovery_start", f"Searching for: {criteria.describe()}")
 
-    result = engine.run(criteria, already_applied=already_applied)
+    # Ranked by estimated fit so the queue gets plausible postings rather than
+    # every opening these companies happen to list. The estimate is free; the
+    # tailoring it avoids is not.
+    result = engine.run(
+        criteria,
+        already_applied=already_applied,
+        profile=load_profile(db, user_id),
+        min_estimated_fit=settings.DISCOVERY_MIN_FIT,
+    )
     postings = [p for p in result["postings"] if p.url not in seen_urls]
 
     # Respect the remaining daily allowance rather than dumping 500 jobs in.
@@ -360,6 +368,14 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
             # The board already gave us the description, so no page fetch later.
             job_description=posting.description or None,
             batch_id=batch_id,
+        )
+
+    if result.get("scored"):
+        best = result["scored"][:5]
+        db.log_event(
+            user_id, "discovery_ranked",
+            "Best estimated fits: "
+            + ", ".join(f"{p.title[:34]} {score:.0f}%" for p, score in best),
         )
 
     for problem in result["problems"][:10]:

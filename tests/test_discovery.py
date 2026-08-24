@@ -24,7 +24,21 @@ from engine.discovery import (
 
 @pytest.fixture()
 def user(db):
-    return db.create_user("ada@example.com", "$argon2id$fake")
+    user = db.create_user("ada@example.com", "$argon2id$fake")
+    # Discovery ranks postings against the profile, so a run needs one.
+    db.save_profile(user.id, {
+        "contact": {"full_name": "Ada", "email": "a@b.com",
+                    "location": {"city": "Austin"}},
+        "summary": "Backend engineer.",
+        "skills": {"hard": ["Microservices Architecture"],
+                   "tooling": ["Java", "Spring Boot", "Kubernetes"]},
+        "experience": [{"company": "Acme", "title": "Engineer",
+                        "start_date": "2020-01", "is_current": True,
+                        "bullets": ["Did a thing."]}],
+        "education": [{"institution": "UoL"}],
+        "legal": {"work_authorization_us": "Yes"},
+    })
+    return db.get_user(user.id)
 
 
 def posting(**kw):
@@ -354,7 +368,7 @@ def test_discovery_queues_tailor_jobs_with_descriptions_attached(db, user, monke
         def __init__(self, **kw):
             pass
 
-        def run(self, criteria, already_applied=(), seen_keys=None):
+        def run(self, criteria, already_applied=(), seen_keys=None, **kw):
             return {
                 "companies": [CompanySuggestion(name="Acme")],
                 "postings": [posting(external_id="1", description="Python and Kubernetes."),
@@ -387,7 +401,7 @@ def test_discovery_skips_postings_already_applied_to(db, user, monkeypatch):
         def __init__(self, **kw):
             pass
 
-        def run(self, criteria, already_applied=(), seen_keys=None):
+        def run(self, criteria, already_applied=(), seen_keys=None, **kw):
             assert "Acme" in already_applied, "applied companies must be excluded upstream"
             return {"companies": [], "postings": [posting(external_id="1")],
                     "problems": [], "notes": ""}
@@ -410,7 +424,7 @@ def test_discovery_respects_the_daily_application_cap(db, user, monkeypatch):
         def __init__(self, **kw):
             pass
 
-        def run(self, criteria, already_applied=(), seen_keys=None):
+        def run(self, criteria, already_applied=(), seen_keys=None, **kw):
             return {"companies": [],
                     "postings": [posting(external_id=str(i),
                                          url=f"https://boards.greenhouse.io/acme/jobs/{i}")
@@ -520,3 +534,41 @@ def test_a_digest_hour_of_zero_is_not_confused_with_unset(db):
 
     db.update_user(user.id, notify_digest_hour=18)
     assert db.users_due_for_digest() == []
+
+
+def test_discovery_only_queues_postings_that_could_plausibly_fit(db, user, monkeypatch):
+    """Ranking is free local string work on text the board already gave us, so
+    a hopeless posting should never reach the queue and cost a tailoring call."""
+    from web.runner import run_discovery_job
+
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    job = db.enqueue_job(user.id, kind="discover",
+                         job_description=DiscoveryCriteria().model_dump_json())
+
+    good = posting(external_id="1", url="https://boards.greenhouse.io/a/jobs/1",
+                   description="We need Java, Spring Boot and Kubernetes experience.")
+    bad = posting(external_id="2", url="https://boards.greenhouse.io/a/jobs/2",
+                  description="We need Haskell, OCaml, Erlang, Prolog and Fortran.")
+
+    captured = {}
+    real_rank = DiscoveryEngine.rank_by_fit
+
+    class FakeEngine:
+        def __init__(self, **kw):
+            pass
+
+        def run(self, criteria, already_applied=(), seen_keys=None,
+                profile=None, min_estimated_fit=0.0):
+            captured["profile_given"] = profile is not None
+            # The real ranking, captured before the patch replaced the class.
+            kept, scored = real_rank(self, [good, bad], profile, min_estimated_fit)
+            return {"companies": [], "postings": kept, "problems": [],
+                    "notes": "", "scored": scored}
+
+    monkeypatch.setattr("engine.discovery.DiscoveryEngine", FakeEngine)
+    run_discovery_job(db, job.id, user.id, gatekeeper=None)
+
+    assert captured["profile_given"] is True
+    queued = [j.job_url for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"]
+    assert good.url in queued
+    assert bad.url not in queued, "a posting with no overlap should not be queued"

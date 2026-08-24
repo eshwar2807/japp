@@ -276,12 +276,29 @@ class DiscoveryEngine:
         criteria: DiscoveryCriteria,
         already_applied: Sequence[str] = (),
         seen_keys: set[str] | None = None,
+        profile: Any | None = None,
+        min_estimated_fit: float = 0.0,
     ) -> dict[str, Any]:
+        """Find companies, read their boards, and keep what could clear the bar.
+
+        Ranking by estimated fit costs nothing - board postings arrive with
+        their full text, so it is pure local string work. Doing it here means
+        the postings that reach the queue are the plausible ones, rather than
+        every opening the boards happen to list.
+        """
         search = self.find_companies(criteria, already_applied)
         postings, problems = self.collect_postings(search.companies, criteria, seen_keys)
+
+        scored: list[tuple[Posting, float]] = []
+        if profile is not None and postings:
+            postings, scored = self.rank_by_fit(postings, profile, min_estimated_fit)
+            log.info("%d of %d postings estimated at or above %.0f%% fit",
+                     len(postings), len(scored), min_estimated_fit)
+
         return {
             "companies": search.companies,
             "postings": postings,
             "problems": problems,
             "notes": search.notes,
+            "scored": scored,
         }

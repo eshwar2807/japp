@@ -73,6 +73,10 @@ DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
 DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "20"))
 # Default auto-apply threshold for new accounts. 0 disables it.
 AUTO_APPLY_THRESHOLD = float(os.getenv("JP_AUTO_APPLY_THRESHOLD", "0"))
+# Minimum free text-only fit estimate for a discovered posting to be queued.
+# The estimate is harsher than the real ceiling, so this sits well below the
+# match target - it only drops the plainly hopeless.
+DISCOVERY_MIN_FIT = float(os.getenv("JP_DISCOVERY_MIN_FIT", "12"))
 LLM_EFFORT = os.getenv("JP_LLM_EFFORT", "high")        # low|medium|high|xhigh|max
 LLM_MAX_TOKENS = int(os.getenv("JP_LLM_MAX_TOKENS", "16000"))
 LLM_TEMPERATURE: float | None = (
