@@ -12,11 +12,21 @@ from __future__ import annotations
 
 import pytest
 
-from engine.ats_optimizer import (
-    profile_corpus,
-    strip_unsupported_skills,
+from engine.ats_optimizer import profile_corpus, strip_unsupported_skills
+from engine.schemas import (
+    ExperienceBlock,
+    JDKeywords,
+    MasterProfile,
+    TailoredResumeDraft,
 )
-from engine.schemas import ExperienceBlock, MasterProfile, TailoredResumeDraft
+
+#: What the posting asks for. Only technologies named here can trigger a
+#: removal, which is the mechanism the live fabrication used.
+POSTING = JDKeywords(
+    role_title="Senior Software Engineer, Backend",
+    tooling=["Python", "Spark", "Kotlin", "Airflow", "MySQL", "Java",
+             "Kubernetes", "Docker", "Jenkins", "SQL"],
+)
 
 
 @pytest.fixture()
@@ -52,28 +62,51 @@ def draft_with(skills):
 # ---------------- the live failure ----------------
 
 
-@pytest.mark.parametrize("invented", ["Python", "MySQL", "Spark", "Kotlin", "Airflow"])
-def test_a_skill_absent_from_the_profile_is_removed(java_profile, invented):
-    clean, removed = strip_unsupported_skills(draft_with(["Java", invented]), java_profile)
+@pytest.mark.parametrize("invented", ["Python", "Spark", "Kotlin", "Airflow"])
+def test_a_technology_absent_from_the_profile_is_removed(java_profile, invented):
+    clean, removed = strip_unsupported_skills(
+        draft_with(["Java", invented]), java_profile, POSTING)
     assert invented in removed
     assert invented not in clean.highlighted_skills
     assert "Java" in clean.highlighted_skills
 
 
 def test_the_exact_live_fabrication_is_caught(java_profile):
-    """Python and MySQL on a Java engineer's resume."""
+    """Python on a Java engineer's resume, because the posting asked for it."""
     clean, removed = strip_unsupported_skills(
-        draft_with(["Distributed systems design", "Java", "Python", "SQL", "MySQL"]),
-        java_profile)
-    assert set(removed) == {"Python", "MySQL", "Distributed systems design"}
-    assert clean.highlighted_skills == ["Java", "SQL"]
+        draft_with(["Distributed systems design", "Java", "Python", "SQL"]),
+        java_profile, POSTING)
+    assert removed == ["Python"]
+    # A real competency is not collateral damage.
+    assert "Distributed systems design" in clean.highlighted_skills
 
 
 def test_a_fabrication_hidden_behind_a_real_word_is_still_caught(java_profile):
     """"Python microservices" claims Python, however familiar the second word."""
     _, removed = strip_unsupported_skills(
-        draft_with(["Python microservices", "Advanced Python"]), java_profile)
+        draft_with(["Python microservices", "Advanced Python"]), java_profile, POSTING)
     assert removed == ["Python microservices", "Advanced Python"]
+
+
+@pytest.mark.parametrize("soft", [
+    "Stakeholder Communication",
+    "Cross Functional Collaboration",
+    "Root Cause Analysis & Troubleshooting",
+    "Technical Leadership & Mentorship",
+    "Code Review Practices",
+    "Performance Tuning & Optimization",
+])
+def test_soft_descriptions_are_left_alone(java_profile, soft):
+    """These name no technology. Stripping them would gut the resume for no
+    honesty gain, since they are unverifiable either way."""
+    clean, removed = strip_unsupported_skills(draft_with([soft]), java_profile, POSTING)
+    assert removed == [] and clean.highlighted_skills == [soft]
+
+
+def test_nothing_is_removed_without_the_posting_vocabulary(java_profile):
+    """With no keywords there is no basis to call anything a fabrication."""
+    _, removed = strip_unsupported_skills(draft_with(["Python"]), java_profile, None)
+    assert removed == []
 
 
 # ---------------- fair rephrasings survive ----------------
@@ -85,23 +118,24 @@ def test_a_fabrication_hidden_behind_a_real_word_is_still_caught(java_profile):
     "Microservices architecture",
     "Production support and incident management",
     "Java development",
+    "Distributed systems design",
 ])
 def test_a_rephrasing_of_a_real_skill_is_kept(java_profile, rephrasing):
     """Stripping these would weaken the resume for no honesty gain."""
-    clean, removed = strip_unsupported_skills(draft_with([rephrasing]), java_profile)
+    clean, removed = strip_unsupported_skills(draft_with([rephrasing]), java_profile, POSTING)
     assert removed == []
     assert clean.highlighted_skills == [rephrasing]
 
 
 def test_a_skill_evidenced_only_in_a_bullet_counts(java_profile):
     """Jenkins appears in a bullet and in tech_used, not the skills list."""
-    clean, removed = strip_unsupported_skills(draft_with(["Jenkins"]), java_profile)
+    clean, removed = strip_unsupported_skills(draft_with(["Jenkins"]), java_profile, POSTING)
     assert removed == [] and clean.highlighted_skills == ["Jenkins"]
 
 
 def test_nothing_is_removed_when_everything_is_supported(java_profile):
     skills = ["Java", "Spring Boot", "Kubernetes", "Docker", "SQL"]
-    clean, removed = strip_unsupported_skills(draft_with(skills), java_profile)
+    clean, removed = strip_unsupported_skills(draft_with(skills), java_profile, POSTING)
     assert removed == []
     assert clean.highlighted_skills == skills
 
@@ -124,7 +158,8 @@ def test_an_invented_skill_cannot_inflate_the_match_score(java_profile):
     from engine.schemas import JDKeywords
 
     keywords = JDKeywords(role_title="Backend Engineer",
-                          hard_skills=["Python", "Java"], tooling=["Spark", "Kubernetes"])
+                          hard_skills=["Java"],
+                          tooling=["Python", "Spark", "Kubernetes"])
     inflated = draft_with(["Java", "Python", "Spark", "Kubernetes"])
 
     class Stub:
@@ -164,3 +199,19 @@ def test_a_keyword_is_never_both_covered_and_missing(java_profile):
     overlap = {c.lower() for c in resume.keywords_covered} & {
         m.lower() for m in resume.keywords_missing}
     assert overlap == set()
+
+
+def test_a_technology_misfiled_as_a_hard_skill_is_still_caught(java_profile):
+    """Pass 1 does not always classify cleanly: "Python" can land in
+    hard_skills rather than tooling. A single-word hard skill is a technology
+    name and must be checked the same way."""
+    posting = JDKeywords(role_title="Backend Engineer",
+                         hard_skills=["Python", "distributed systems design"],
+                         tooling=["Kubernetes"])
+    clean, removed = strip_unsupported_skills(
+        draft_with(["Java", "Python", "Distributed systems design"]),
+        java_profile, posting)
+
+    assert removed == ["Python"]
+    # The multi-word competency is a description, not a technology claim.
+    assert "Distributed systems design" in clean.highlighted_skills

@@ -131,59 +131,62 @@ def profile_corpus(profile: MasterProfile) -> str:
     return "\n".join(p for p in parts if p)
 
 
-#: Words that describe *what kind* of skill something is rather than naming it.
-#: "Kubernetes orchestration" is a fair rephrasing of "Kubernetes"; "Python
-#: programming" is not a rephrasing of anything if the profile lacks Python.
-#: So the check is on the distinctive tokens, not the whole phrase.
-_GENERIC_SKILL_WORDS = {
-    "and", "or", "the", "of", "in", "for", "with", "a", "an",
-    "architecture", "architectures", "design", "designing", "development",
-    "developing", "engineering", "engineer", "management", "managing",
-    "orchestration", "automation", "automated", "systems", "system",
-    "programming", "pipeline", "pipelines", "cloud", "native", "quality",
-    "standards", "support", "practices", "principles", "based", "driven",
-    "expertise", "experience", "skills", "advanced", "modern", "scale",
-    "scalable", "distributed", "high", "availability", "performance",
-    "integration", "deployment", "testing", "migration", "modernization",
-    "leadership", "mentorship", "collaboration", "communication", "ownership",
-}
-
-
-def _distinctive_tokens(skill: str) -> list[str]:
-    tokens = re.split(r"[^a-z0-9+#.]+", (skill or "").lower())
-    return [t for t in tokens if len(t) > 1 and t not in _GENERIC_SKILL_WORDS]
-
-
 def strip_unsupported_skills(
-    draft: TailoredResumeDraft, profile: MasterProfile
+    draft: TailoredResumeDraft,
+    profile: MasterProfile,
+    keywords: JDKeywords | None = None,
 ) -> tuple[TailoredResumeDraft, list[str]]:
-    """Remove highlighted skills the profile does not actually support.
+    """Remove claimed skills that name a technology the profile lacks.
 
-    The prompt forbids claiming a skill the candidate lacks, and a model on the
-    cheap tier still added "Python" and "MySQL" to a Java engineer's resume
-    because the posting asked for them. A prompt is a request; this is a check.
+    A live run put "Python" on a Java engineer's resume because the posting
+    asked for it. That is the mechanism worth defending against: the model
+    reaching into the job description for a named technology the candidate does
+    not have. The prompt already forbids it; this makes it impossible.
 
-    Returns the cleaned draft and whatever was removed, so the removal is
-    reported rather than silently swallowed.
+    The test is deliberately narrow. Pass 1 has already identified the
+    posting's named technologies in `keywords.tooling`, so a claimed skill is
+    removed only when it contains one of those names and the profile provides
+    no evidence for it. Soft descriptions - "Stakeholder Communication",
+    "Root Cause Analysis" - name no technology and are left alone: they are
+    unverifiable either way, and stripping them would gut the resume for no
+    honesty gain.
+
+    Returns the cleaned draft and whatever was removed, so a model that keeps
+    inventing is visible rather than silently corrected.
     """
+    if keywords is None:
+        return draft, []
+
+    # `tooling` is where pass 1 puts named products and languages, but it does
+    # not always classify cleanly - "Python" can land in hard_skills instead.
+    # Single-word hard skills are technology names too; multi-word ones
+    # ("distributed systems design") are competencies and must not qualify,
+    # or a fair description gets stripped as a fabrication.
+    named_tech = list(keywords.tooling) + [
+        skill for skill in keywords.hard_skills if len(skill.split()) == 1
+    ]
+    if not named_tech:
+        return draft, []
+
     corpus = profile_corpus(profile)
+    # Technologies the posting names that the profile cannot evidence. These
+    # are the only words capable of triggering a removal.
+    unsupported_tech = [
+        tech for tech in dict.fromkeys(named_tech)
+        if tech.strip() and not keyword_present(tech, corpus)
+    ]
+    if not unsupported_tech:
+        return draft, []
+
     kept, removed = [], []
     for skill in draft.highlighted_skills:
-        distinctive = _distinctive_tokens(skill)
-        if not distinctive:
-            # A phrase made entirely of generic words ("code quality and
-            # standards") names no technology, so match the whole phrase.
-            supported = keyword_present(skill, corpus)
+        claimed = next(
+            (tech for tech in unsupported_tech if keyword_present(tech, skill)), None
+        )
+        if claimed and not keyword_present(skill, corpus):
+            removed.append(skill)
         else:
-            # The first distinctive token is the head of the phrase and carries
-            # the claim: "Docker containerization" claims Docker, "Python
-            # microservices" claims Python. Requiring every token instead would
-            # strip fair rephrasings like "production support and incident
-            # management"; requiring any would let "Python microservices"
-            # through on the strength of "microservices".
-            supported = keyword_present(distinctive[0], corpus)
-
-        (kept if supported else removed).append(skill)
+            kept.append(skill)
 
     if not removed:
         return draft, []
@@ -498,7 +501,7 @@ class ATSOptimizer:
             # Enforce the no-fabrication rule rather than trusting it. Anything
             # the profile does not support is removed before scoring, so an
             # invented skill cannot inflate the match either.
-            draft, invented = strip_unsupported_skills(draft, self.profile)
+            draft, invented = strip_unsupported_skills(draft, self.profile, keywords)
             if invented:
                 log.warning(
                     "Removed %d unsupported skill(s) from the tailored resume: %s",
