@@ -71,6 +71,8 @@ LLM_MODEL_DISCOVERY = os.getenv("JP_LLM_MODEL_DISCOVERY", "claude-opus-5")
 DAILY_SPEND_CAP_USD = float(os.getenv("JP_DAILY_SPEND_CAP_USD", "25"))
 # Applications the discovery queue may enqueue per user per day.
 DAILY_APPLICATION_CAP = int(os.getenv("JP_DAILY_APPLICATION_CAP", "20"))
+# Default auto-apply threshold for new accounts. 0 disables it.
+AUTO_APPLY_THRESHOLD = float(os.getenv("JP_AUTO_APPLY_THRESHOLD", "0"))
 LLM_EFFORT = os.getenv("JP_LLM_EFFORT", "high")        # low|medium|high|xhigh|max
 LLM_MAX_TOKENS = int(os.getenv("JP_LLM_MAX_TOKENS", "16000"))
 LLM_TEMPERATURE: float | None = (

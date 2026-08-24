@@ -98,6 +98,9 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     if not api_key and not settings.ANTHROPIC_API_KEY:
         raise RuntimeError("Add your Anthropic API key in Settings first.")
 
+    # Bulk discovery work runs on the cheap tier; roles flagged as priority get
+    # the expensive one. Resolved before it is logged.
+    model = db.model_for_job(user_id, bool(job.priority))
     db.log_event(user_id, "tailor_start",
                  f"Tailoring for {job.job_url} on {model}"
                  f"{' (priority)' if job.priority else ''}")
@@ -107,9 +110,6 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         db.log_event(user_id, "fetch_jd", "Fetching the posting")
         jd_text = fetch_job_description(job.job_url)
 
-    # Bulk discovery work runs on the cheap tier; roles you flag as priority
-    # get the expensive one. At a hundred a day this is most of the bill.
-    model = db.model_for_job(user_id, bool(job.priority))
     application_ref: list[int | None] = [job.application_id]
     optimizer = ATSOptimizer(
         profile=profile, model=model, api_key=api_key,
@@ -155,9 +155,36 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
 
     db.log_event(user_id, "resume_built", f"Resume PDF written: {pdf_path.name}",
                  application_id=application.id)
-    db.finish_job(job_id, JobStatus.DONE,
-                  f"Tailored at {resume.ats_match_percentage:.1f}% match",
-                  application_id=application.id)
+
+    # Queue the browser step for anything that cleared the bar. This does not
+    # submit anything: the driver still stops at the submit gate for approval.
+    # It only saves opening each tailored application and clicking through.
+    threshold = db.auto_apply_threshold(user_id)
+    queued_apply = False
+    if threshold is not None and resume.ats_match_percentage >= threshold:
+        db.enqueue_job(user_id, kind="apply", job_url=job.job_url,
+                       application_id=application.id, batch_id=job.batch_id)
+        queued_apply = True
+        db.log_event(
+            user_id, "auto_queued",
+            f"{resume.ats_match_percentage:.1f}% >= {threshold:.0f}% threshold; "
+            "queued for the agent. Submission still needs your approval.",
+            application_id=application.id,
+        )
+    elif threshold is not None:
+        db.log_event(
+            user_id, "below_threshold",
+            f"{resume.ats_match_percentage:.1f}% is below the {threshold:.0f}% "
+            "threshold; left as a draft for you to review.",
+            application_id=application.id,
+        )
+
+    db.finish_job(
+        job_id, JobStatus.DONE,
+        f"Tailored at {resume.ats_match_percentage:.1f}% match"
+        + (" - queued to apply" if queued_apply else ""),
+        application_id=application.id,
+    )
 
 
 # --------------------------------------------------------------------------

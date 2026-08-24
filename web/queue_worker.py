@@ -150,6 +150,8 @@ class QueueGatekeeper(Gatekeeper):
         release_slot: Callable[[], None],
         reacquire_slot: Callable[[], None],
         application_id: int | None = None,
+        wait_seconds: int = HELD_BROWSER_TIMEOUT,
+        poll_seconds: float = 1.0,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -159,6 +161,9 @@ class QueueGatekeeper(Gatekeeper):
         self.release_slot = release_slot
         self.reacquire_slot = reacquire_slot
         self.application_id = application_id
+        #: Injectable so tests do not sit on the real one-hour gate timeout.
+        self.wait_seconds = wait_seconds
+        self.poll_seconds = poll_seconds
 
     # -- helpers --
 
@@ -207,9 +212,9 @@ class QueueGatekeeper(Gatekeeper):
         # Free the slot so the rest of the batch keeps moving while this waits.
         self.release_slot()
         try:
-            if not session.event.wait(timeout=HELD_BROWSER_TIMEOUT):
+            if not session.event.wait(timeout=self.wait_seconds):
                 raise TimeoutError(
-                    f"No response within {HELD_BROWSER_TIMEOUT // 60} minutes."
+                    f"No response within {int(self.wait_seconds) // 60} minutes."
                 )
             if session.cancelled:
                 raise QueueStopped(f"Job #{self.job_id} cancelled while parked.")

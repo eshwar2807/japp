@@ -655,12 +655,45 @@ def settings_page(request: Request, user: CurrentUser, db: Database,
         api_key_prefix=user.api_key_prefix,
         notifications=db.list_notifications(user.id, limit=8),
         desktop_available=_desktop_available(),
+        auto_apply_threshold=db.auto_apply_threshold(user.id),
+        spend_cap=db.daily_cap_for(user.id),
+        spend_today=db.spend_today(user.id),
         api_key_created=user.api_key_created_at,
         new_key=new_key,
         credentials=credentials,
         model=settings.LLM_MODEL,
         ok=ok, error=error,
     )
+
+
+@router.post("/settings/automation")
+def save_automation(request: Request, user: CurrentUser, db: Database,
+                    auto_apply_enabled: str = Form(""),
+                    auto_apply_threshold: str = Form("85"),
+                    daily_spend_cap_usd: str = Form(""),
+                    _csrf: None = CSRFProtected):
+    enabled = str(auto_apply_enabled).lower() in ("on", "true", "1")
+    threshold = None
+    if enabled:
+        try:
+            threshold = float(auto_apply_threshold)
+        except (TypeError, ValueError):
+            return _redirect("/settings", error="The threshold must be a number.")
+        if not 0 < threshold <= 100:
+            return _redirect("/settings", error="The threshold must be between 1 and 100.")
+
+    cap = None
+    if str(daily_spend_cap_usd).strip():
+        try:
+            cap = max(0.0, float(daily_spend_cap_usd))
+        except (TypeError, ValueError):
+            return _redirect("/settings", error="The spend cap must be a number.")
+
+    db.update_user(user.id, auto_apply_threshold=threshold, daily_spend_cap_usd=cap)
+    db.log_event(user.id, "automation_settings",
+                 f"Auto-apply {'at ' + str(int(threshold)) + '%' if threshold else 'off'}"
+                 f"; spend cap {'$' + str(cap) if cap is not None else 'default'}")
+    return _redirect("/settings", ok="Automation settings saved.")
 
 
 @router.post("/settings/anthropic-key")

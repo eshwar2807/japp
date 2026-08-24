@@ -257,6 +257,8 @@ class DBManager:
         tailored_payload: dict | None = None,
         notes: str = "",
         user_id: int | None = None,
+        salary_min: float | None = None,
+        salary_max: float | None = None,
     ) -> Application:
         with self.session() as sess:
             app = Application(
@@ -271,6 +273,8 @@ class DBManager:
                 tailored_payload=json.dumps(tailored_payload) if tailored_payload else None,
                 notes=notes,
                 user_id=user_id,
+                salary_min=salary_min,
+                salary_max=salary_max,
             )
             sess.add(app)
             sess.flush()
@@ -1285,3 +1289,15 @@ class DBManager:
             user = sess.get(User, user_id)
             if user:
                 user.pending_profile_json = None
+
+    def auto_apply_threshold(self, user_id: int) -> float | None:
+        """The score at or above which the browser step queues itself.
+
+        None means off, and every tailored application waits for a click.
+        """
+        user = self.get_user(user_id)
+        if user is not None and user.auto_apply_threshold is not None:
+            return float(user.auto_apply_threshold) or None
+        from config import settings as _settings
+
+        return float(_settings.AUTO_APPLY_THRESHOLD) or None

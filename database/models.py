@@ -241,6 +241,11 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    #: Queue the browser step automatically when a tailored resume scores at
+    #: or above this. None disables it and every application waits for a click.
+    #: The submit gate is unaffected: nothing is sent without approval.
+    auto_apply_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     #: Per-user overrides for the tiered models and the daily spend ceiling.
     model_bulk: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model_priority: Mapped[str | None] = mapped_column(String(64), nullable=True)

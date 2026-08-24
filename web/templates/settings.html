@@ -60,6 +60,39 @@
 </div>
 
 <div class="card">
+  <h2>Automation</h2>
+  <p class="sub">Auto-apply queues the browser step for you. It does not submit
+    anything &mdash; the driver still stops at the submit gate for your approval on
+    every application, and a verification challenge still parks the run.</p>
+
+  <form method="post" action="/settings/automation" class="mt-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="check mb-4">
+      <input type="checkbox" name="auto_apply_enabled"
+             {{ 'checked' if auto_apply_threshold }}>
+      Queue applications automatically above a match score
+    </label>
+    <div class="field-row">
+      <div class="field"><label for="auto_apply_threshold">Match threshold (%)</label>
+        <input id="auto_apply_threshold" type="number" name="auto_apply_threshold"
+               min="1" max="100" step="1"
+               value="{{ auto_apply_threshold|round|int if auto_apply_threshold else 85 }}">
+        <p class="hint">Anything scoring below this stays a draft for you to review.</p></div>
+      <div class="field"><label for="daily_spend_cap_usd">Daily spend cap (USD)</label>
+        <input id="daily_spend_cap_usd" type="number" name="daily_spend_cap_usd"
+               min="0" step="1" value="{{ spend_cap|round|int if spend_cap else '' }}">
+        <p class="hint">Spent today: {{ spend_today|money }}. The queue pauses at the cap;
+          blank uses the instance default.</p></div>
+    </div>
+    <button type="submit">Save automation</button>
+  </form>
+
+  <p class="hint mt-4">Queued applications wait for the local agent. Nothing runs
+    a browser until you start it:
+    <span class="mono">python -m agent --server https://japp.fly.dev</span></p>
+</div>
+
+<div class="card">
   <h2>Notifications</h2>
   <p class="sub">Told when a run parks, so you can walk away from a batch and come
     back once. Desktop alerts stay on this machine. The webhook is optional and
