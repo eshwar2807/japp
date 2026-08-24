@@ -8,7 +8,8 @@
 </div>
 
 <div class="grid grid-4 mb-6">
-  <div class="stat"><div class="value">{{ eligible_today }}/{{ daily_cap }}</div>
+  <div class="stat"><div class="value">
+      <a href="/applications?ready=1">{{ eligible_today }}/{{ daily_cap }}</a></div>
     <div class="label">Ready to apply</div>
     <div class="note">scoring {{ eligible_threshold|round|int }}%+; screening continues
       until this many are found</div></div>

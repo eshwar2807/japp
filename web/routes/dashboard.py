@@ -245,18 +245,33 @@ async def save_profile(request: Request, user: CurrentUser, db: Database,
 
 @router.get("/applications", response_class=HTMLResponse)
 def applications_page(request: Request, user: CurrentUser, db: Database,
-                      status: str = "", ok: str = "", error: str = ""):
+                      status: str = "", ready: int = 0, ok: str = "", error: str = ""):
     status_filter = None
     if status:
         try:
             status_filter = ApplicationStatus.from_str(status)
         except ValueError:
             status_filter = None
+
+    applications = db.list_applications(
+        status=status_filter, limit=200, user_id=user.id, ready_only=bool(ready)
+    )
+    # Which of these already have a browser run waiting, so the list can say
+    # what is queued rather than leaving it to be inferred from the score.
+    queued_ids = {
+        job.application_id
+        for job in db.list_jobs(user_id=user.id, statuses=(JobStatus.QUEUED, JobStatus.READY))
+        if job.kind == "apply"
+    }
     return render(
         request, "applications.html", user, db,
-        applications=db.list_applications(status=status_filter, limit=100, user_id=user.id),
+        applications=applications,
         statuses=list(ApplicationStatus),
-        current_status=status, ok=ok, error=error,
+        current_status=status,
+        ready_only=bool(ready),
+        queued_ids=queued_ids,
+        ready_count=db.eligible_today(user.id),
+        ok=ok, error=error,
     )
 
 

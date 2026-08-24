@@ -25,6 +25,8 @@
 
 <div class="card">
   <div class="actions-row mb-4">
+    <a class="btn {{ '' if ready_only else 'btn-ghost' }} btn-sm"
+       href="/applications?ready=1">Ready to apply ({{ ready_count }})</a>
     <a class="btn btn-ghost btn-sm" href="/applications">All</a>
     {% for status in statuses %}
     <a class="btn btn-ghost btn-sm{{ ' active' if current_status == status.value }}"
@@ -33,7 +35,8 @@
   </div>
   {% if applications %}
   <div class="table-wrap"><table>
-    <tr><th>#</th><th>Company</th><th>Role</th><th>Match</th><th>Status</th><th>Created</th><th></th></tr>
+    <tr><th>#</th><th>Company</th><th>Role</th><th>Match</th><th>Status</th>
+        <th>Queued</th><th>Created</th><th></th></tr>
     {% for app in applications %}
     <tr>
       <td class="mono">{{ app.id }}</td>
@@ -41,11 +44,20 @@
       <td>{{ app.role_title }}</td>
       <td><span class="pill {{ 'pill-good' if app.match_score >= eligible_threshold else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
       <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
+      <td>{% if app.id in queued_ids %}<span class="pill pill-good">queued</span>
+          {% elif not app.eligible %}<span class="pill pill-bad"
+              title="{{ app.ineligible_reason }}">not eligible</span>
+          {% endif %}</td>
       <td class="muted">{{ app.created_at|day }}</td>
       <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>
     </tr>
     {% endfor %}
   </table></div>
-  {% else %}<p class="empty">Nothing yet. Tailor your first application above.</p>{% endif %}
+  {% else %}
+  <p class="empty">
+    {% if ready_only %}Nothing has reached {{ eligible_threshold|round|int }}% yet.
+    {% else %}Nothing yet. Queue some postings above.{% endif %}
+  </p>
+  {% endif %}
 </div>
 {% endblock %}

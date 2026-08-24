@@ -302,6 +302,8 @@ class DBManager:
         status: ApplicationStatus | None = None,
         limit: int = 100,
         user_id: int | None = None,
+        ready_only: bool = False,
+        threshold: float | None = None,
     ) -> Sequence[Application]:
         with self.session() as sess:
             stmt = (
@@ -314,6 +316,14 @@ class DBManager:
                 stmt = stmt.where(Application.status == status)
             if user_id is not None:
                 stmt = stmt.where(Application.user_id == user_id)
+            if ready_only:
+                from config import settings as _settings
+
+                bar = threshold if threshold is not None else _settings.ELIGIBLE_MATCH_THRESHOLD
+                stmt = stmt.where(
+                    Application.eligible.is_(True),
+                    Application.match_score >= bar,
+                ).order_by(Application.match_score.desc())
             return sess.scalars(stmt).all()
 
     def update_application(self, app_id: int, user_id: int | None = None, **fields) -> Application:

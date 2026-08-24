@@ -1246,3 +1246,72 @@ def test_scores_are_marked_against_the_configured_threshold(web, monkeypatch):
     page = web.get("/applications").text
     # 73% sits above the 70% bar, so it must render as a pass, not a warning.
     assert re.search(r'pill-good[^>]*>\s*73', page) or "pill-good" in page
+
+
+# ---------------- the ready-to-apply view ----------------
+
+
+def test_the_ready_filter_shows_only_what_can_be_applied_to(web):
+    """The counter said 21 ready with nowhere to see which 21."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+
+    web.db.create_application(company="Toast", role_title="Senior Java Engineer",
+                              job_url="https://x.com/1", match_score=81.0, user_id=user.id)
+    web.db.create_application(company="LowScore", role_title="Java Engineer",
+                              job_url="https://x.com/2", match_score=52.0, user_id=user.id)
+    web.db.create_application(company="NoSponsor", role_title="Java Engineer",
+                              job_url="https://x.com/3", match_score=93.0, user_id=user.id,
+                              eligible=False, ineligible_reason="will not sponsor")
+
+    page = web.get("/applications?ready=1").text
+    assert "Toast" in page
+    assert "LowScore" not in page       # below the bar
+    assert "NoSponsor" not in page      # high score, cannot be applied to
+
+
+def test_the_full_list_still_shows_everything(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.create_application(company="LowScore", role_title="Java Engineer",
+                              job_url="https://x.com/2", match_score=52.0, user_id=user.id)
+
+    assert "LowScore" in web.get("/applications").text
+
+
+def test_the_list_marks_which_applications_are_queued(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    app = web.db.create_application(company="Toast", role_title="Senior Java Engineer",
+                                    job_url="https://x.com/1", match_score=81.0,
+                                    user_id=user.id)
+    web.db.enqueue_job(user.id, kind="apply", job_url="https://x.com/1",
+                       application_id=app.id)
+
+    page = web.get("/applications?ready=1").text
+    assert "queued" in page
+
+
+def test_an_ineligible_application_shows_why(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.create_application(company="Branch", role_title="Senior Engineer",
+                              job_url="https://x.com/1", match_score=90.0, user_id=user.id,
+                              eligible=False,
+                              ineligible_reason="employer states they will not sponsor")
+
+    page = web.get("/applications").text
+    assert "not eligible" in page
+    assert "will not sponsor" in page
+
+
+def test_ready_applications_are_ordered_best_first(web):
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    for i, score in enumerate([72.0, 91.0, 80.0]):
+        web.db.create_application(company=f"Co{i}", role_title="Java Engineer",
+                                  job_url=f"https://x.com/{i}", match_score=score,
+                                  user_id=user.id)
+
+    scores = [a.match_score for a in web.db.list_applications(user_id=user.id, ready_only=True)]
+    assert scores == sorted(scores, reverse=True)
