@@ -1097,7 +1097,7 @@ def test_the_dashboard_says_nothing_is_sent_until_the_agent_runs(web):
     assert "python -m agent" in page
 
     discover = web.get("/discover").text
-    assert "Tailored today" in discover
+    assert "Ready to apply" in discover
     assert "Submitted today" in discover
 
 
@@ -1197,3 +1197,23 @@ def test_a_finished_apply_job_does_not_block_requeueing(web):
     assert web.db.has_pending_apply_job(app.id) is False
     web.post(f"/applications/{app.id}/apply", data={"csrf_token": csrf(web)})
     assert len([j for j in web.db.list_jobs(user_id=user.id) if j.kind == "apply"]) == 2
+
+
+def test_the_daily_target_is_shown_as_ready_to_apply_not_tailored(web):
+    """The cap counts applications worth sending. Showing "Tailored 21/20"
+    against it implied the day's work was done when nine qualified."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.save_profile(user.id, _ready_profile())
+    web.db.set_anthropic_key(user.id, "sk-ant-test")
+
+    for i, score in enumerate([90.0, 85.0, 72.0, 60.0, 45.0, 30.0]):
+        web.db.create_application(company=f"Co{i}", role_title="Java Engineer",
+                                  job_url=f"https://x.com/{i}", match_score=score,
+                                  user_id=user.id)
+
+    page = web.get("/discover").text
+    assert "Ready to apply" in page
+    assert "3/20" in page                 # three at or above 70%
+    assert "6 tailored" in page           # all six still reported
+    assert "Tailored today" not in page

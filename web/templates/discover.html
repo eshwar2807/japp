@@ -8,17 +8,20 @@
 </div>
 
 <div class="grid grid-4 mb-6">
-  <div class="stat"><div class="value">{{ tailored_today }}/{{ daily_cap }}</div>
-    <div class="label">Tailored today</div>
-    <div class="note">the cap limits tailoring, which is what costs money</div></div>
+  <div class="stat"><div class="value">{{ eligible_today }}/{{ daily_cap }}</div>
+    <div class="label">Ready to apply</div>
+    <div class="note">scoring {{ eligible_threshold|round|int }}%+; screening continues
+      until this many are found</div></div>
   <div class="stat"><div class="value">{{ submitted_today }}</div>
     <div class="label">Submitted today</div>
     <div class="note">
       {% if awaiting_agent %}{{ awaiting_agent }} waiting for the agent
-      {% else %}nothing queued to send{% endif %}</div></div>
+      {% else %}nothing queued to send{% endif %}
+      &middot; {{ tailored_today }} tailored</div></div>
   <div class="stat"><div class="value">{{ spend_today|money }}</div>
     <div class="label">Spend today</div>
-    <div class="note">cap {{ spend_cap|money }}</div></div>
+    <div class="note">cap {{ spend_cap|money }} &middot; {{ screened_today }} of
+      {{ screen_cap }} postings screened</div></div>
   <div class="stat"><div class="value fs-lg mono">{{ bulk_model }}</div>
     <div class="label">Tailoring model</div>
     <div class="note">search uses {{ discovery_model }}</div></div>
