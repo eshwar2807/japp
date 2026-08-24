@@ -1009,3 +1009,25 @@ def test_another_user_cannot_see_your_draft(web, monkeypatch):
     other = TestClient(web.app, follow_redirects=False)
     signup(other, "eve@example.com")
     assert "Analytical Engines" not in other.get("/profile").text
+
+
+def test_desired_salary_is_not_required_to_be_ready(web):
+    """It is answered per posting from the published range, so demanding a
+    figure up front blocked setup for a value the pipeline no longer needs."""
+    from web.profile_form import completeness
+
+    profile = _ready_profile()
+    profile["legal"]["desired_salary"] = ""
+    result = completeness(profile)
+
+    assert result["ready"] is True
+    assert "Desired salary" not in result["missing"]
+
+
+def test_earliest_start_date_is_still_required(web):
+    """That one has no computable default and goes straight onto forms."""
+    from web.profile_form import completeness
+
+    profile = _ready_profile()
+    profile["legal"]["earliest_start_date"] = ""
+    assert completeness(profile)["ready"] is False

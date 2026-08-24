@@ -222,7 +222,10 @@ def completeness(profile: dict[str, Any]) -> dict[str, Any]:
         ("Work authorization", bool(legal.get("work_authorization_us"))),
         ("Sponsorship answer", bool(legal.get("requires_sponsorship_now_or_future"))),
         ("Earliest start date", bool(legal.get("earliest_start_date"))),
-        ("Desired salary", bool(legal.get("desired_salary"))),
+        # Desired salary is deliberately not required. It is answered per
+        # posting from whatever range the posting publishes, falling back to a
+        # configured default, so demanding one figure up front blocks setup for
+        # a value the pipeline no longer needs.
     ]
     missing = [name for name, ok in checks if not ok]
     done = len(checks) - len(missing)
