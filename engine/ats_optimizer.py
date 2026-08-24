@@ -84,30 +84,101 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9+#. ]+", " ", text.lower())
 
 
-def keyword_present(keyword: str, haystack: str, threshold: int | None = None) -> bool:
-    """True when `keyword` appears in `haystack`, allowing minor variation.
+#: Words that carry no matching signal of their own. Used only to decide which
+#: tokens of a multi-word requirement must be evidenced.
+_FILLER_TOKENS = {
+    "and", "or", "the", "of", "in", "for", "with", "to", "a", "an", "on",
+    "strong", "solid", "proven", "excellent", "good", "deep", "hands",
+    "experience", "expertise", "knowledge", "skills", "ability", "understanding",
+    "using", "such", "as", "e.g", "etc", "including", "related", "various",
+    "architectures", "architecture", "services", "service", "systems", "system",
+    "development", "engineering", "practices", "principles", "fundamentals",
+    "technologies", "tools", "frameworks", "concepts", "based",
+}
 
-    Exact substring first (cheap, no false positives), then a token-set ratio
-    to catch "CI/CD pipelines" vs "CI/CD" and "Postgres" vs "PostgreSQL".
+#: Below this length a keyword is matched on exact word boundaries only. "Go",
+#: "R" and "C" otherwise fuzzy-match half the document and credit languages the
+#: candidate does not have.
+_EXACT_MATCH_MAX_LEN = 4
+#: Tokens at least this long may match a longer word built on the same stem, so
+#: "container" is evidenced by "containerization". Set above the length of most
+#: short language names on purpose: at five, "Scala" matched "Scalable" and
+#: credited a language the candidate had never used.
+_STEM_MIN_LEN = 6
+
+
+def _word_in(token: str, haystack_words: set[str]) -> bool:
+    """Is this token evidenced, allowing plurals and a shared stem?
+
+    "APIs" must be evidenced by "API", and "container" by "containerization".
+    Without either, a profile written in the singular fails requirements
+    written in the plural, which is most of them.
+    """
+    if token in haystack_words:
+        return True
+
+    # Plurals in either direction, before any stem logic: "apis" / "api".
+    variants = {token.rstrip("s"), token + "s"} if len(token) > 2 else set()
+    if variants & haystack_words:
+        return True
+
+    if len(token) >= _STEM_MIN_LEN:
+        return any(
+            word.startswith(token) or (len(word) >= _STEM_MIN_LEN and token.startswith(word))
+            for word in haystack_words
+        )
+    return False
+
+
+def keyword_present(keyword: str, haystack: str, threshold: int | None = None) -> bool:
+    """True when `haystack` evidences `keyword`.
+
+    Requirements are written in prose and profiles in shorthand, so exact
+    matching misses real coverage: "cloud-native architectures" is evidenced by
+    "Cloud-Native Deployment", and "container orchestration" by "Docker
+    Containerization & Orchestration". A multi-word requirement is therefore
+    matched on its meaningful tokens rather than its exact wording.
+
+    Short keywords go the other way. "Go" fuzzy-matched enough of any document
+    to be counted as covered, crediting a language the candidate never used, so
+    anything at or below four characters must match on a word boundary.
     """
     threshold = threshold or settings.FUZZY_MATCH_THRESHOLD
     kw, hay = _normalize(keyword).strip(), _normalize(haystack)
-    if not kw:
+    if not kw or not hay:
         return False
+
+    words = set(hay.split())
+    tokens = kw.split()
+
+    # Acronyms and two-letter languages: exact word, no fuzz.
+    if len(kw) <= _EXACT_MATCH_MAX_LEN:
+        return kw in words
+
+    if len(tokens) == 1:
+        # No raw substring check for a single token: it matched "Scala" inside
+        # "Scalable" and credited a language the candidate had never used.
+        return _word_in(kw, words) or any(
+            fuzz.ratio(kw, word) >= threshold for word in words if len(word) > 3
+        )
+
+    # A multi-word phrase spans word boundaries by construction, so a substring
+    # hit here is a genuine one.
     if kw in hay:
         return True
 
-    # Slide a window of the keyword's own token length across the document and
-    # compare like with like. Scoring the keyword against the whole document
-    # would dilute the ratio to nothing; scoring against an equal-length window
-    # catches real variants ("Postgres"/"PostgreSQL", "system"/"systems")
-    # without matching unrelated text.
-    kw_tokens = kw.split()
-    hay_tokens = hay.split()
-    window = len(kw_tokens)
-    for i in range(max(len(hay_tokens) - window + 1, 1)):
-        chunk = " ".join(hay_tokens[i : i + window])
-        if fuzz.token_sort_ratio(kw, chunk) >= threshold:
+    # Multi-word: every meaningful token must be evidenced. Filler words carry
+    # no signal, so requiring them would reject fair paraphrases.
+    meaningful = [t for t in tokens if t not in _FILLER_TOKENS and len(t) > 2]
+    if meaningful and all(_word_in(token, words) for token in meaningful):
+        return True
+
+    # Last resort: the phrase as written, against a same-length window.
+    window = len(tokens)
+    hay_words = hay.split()
+    for i in range(max(len(hay_words) - window + 1, 1)):
+        chunk = " ".join(hay_words[i : i + window + 2])
+        if fuzz.token_set_ratio(kw, chunk) >= threshold:
             return True
     return False
 
@@ -199,6 +270,62 @@ def resume_text(tailored: TailoredResumeSchema | TailoredResumeDraft) -> str:
     for block in tailored.tailored_experience:
         parts.extend([block.title, block.company, " ".join(block.bullets)])
     return "\n".join(parts)
+
+
+def ceiling_score(keywords: JDKeywords, profile: MasterProfile) -> tuple[float, list[str]]:
+    """The best score this profile could possibly reach on this posting.
+
+    Tailoring can surface a fact more prominently; it cannot invent one. So the
+    ceiling is what a resume containing *everything* in the profile would
+    score. If that is below target, no amount of rewriting reaches it and the
+    expensive tailoring pass is wasted money.
+
+    Returns (ceiling, unreachable_keywords).
+    """
+    corpus = profile_corpus(profile)
+    buckets = {
+        "hard_skills": keywords.hard_skills,
+        "tooling": keywords.tooling,
+        "soft_skills": keywords.soft_skills,
+    }
+
+    unreachable: list[str] = []
+    earned = available = 0.0
+
+    for name, terms in buckets.items():
+        weight = settings.SCORE_WEIGHTS.get(name, 0.0)
+        if not terms:
+            continue
+        available += weight
+        hits = 0
+        for term in terms:
+            if keyword_present(term, corpus):
+                hits += 1
+            else:
+                unreachable.append(term)
+        earned += weight * (hits / len(terms))
+
+    # The title is always reachable: tailoring may adopt the posted title.
+    title_weight = settings.SCORE_WEIGHTS.get("title", 0.0)
+    if keywords.role_title:
+        available += title_weight
+        earned += title_weight
+
+    ceiling = 100.0 * earned / available if available else 0.0
+    return round(min(ceiling, 100.0), 1), unreachable
+
+
+class NotViable(Exception):
+    """The posting cannot reach the target score from this profile."""
+
+    def __init__(self, ceiling: float, target: float, unreachable: list[str]) -> None:
+        super().__init__(
+            f"Best achievable {ceiling:.1f}% against a {target:.0f}% target; "
+            f"missing {len(unreachable)} requirement(s)."
+        )
+        self.ceiling = ceiling
+        self.target = target
+        self.unreachable = unreachable
 
 
 def score_match(
@@ -464,6 +591,7 @@ class ATSOptimizer:
         few_shot: Sequence[dict] | Callable[[JDKeywords], Sequence[dict]] = (),
         target: float | None = None,
         max_iterations: int | None = None,
+        check_viability: bool = True,
     ) -> tuple[TailoredResumeSchema, JDKeywords]:
         """Full two-pass tailoring with score-driven retries.
 

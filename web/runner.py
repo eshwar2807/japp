@@ -115,10 +115,26 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         profile=profile, model=model, api_key=api_key,
         on_usage=usage_recorder(db, user_id, application_ref, model),
     )
-    resume, keywords = optimizer.run(
-        jd_text,
-        few_shot=lambda kw: db.successful_examples(kw.role_title, user_id=user_id),
-    )
+    from engine.ats_optimizer import NotViable
+
+    try:
+        resume, keywords = optimizer.run(
+            jd_text,
+            few_shot=lambda kw: db.successful_examples(kw.role_title, user_id=user_id),
+        )
+    except NotViable as verdict:
+        # Rejected after one cheap call instead of four. Nothing is created:
+        # a posting the profile cannot meet is not an application.
+        db.log_event(
+            user_id, "not_viable",
+            f"Best achievable {verdict.ceiling:.1f}% against a "
+            f"{verdict.target:.0f}% target. Out of reach: "
+            + ", ".join(verdict.unreachable[:8]),
+        )
+        db.finish_job(job_id, JobStatus.DONE,
+                      f"Skipped: best achievable {verdict.ceiling:.1f}% "
+                      f"(target {verdict.target:.0f}%)")
+        return
     if resume.removed_unsupported:
         db.log_event(
             user_id, "fabrication_blocked",
