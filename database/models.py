@@ -392,6 +392,37 @@ class LogLevel(str, enum.Enum):
     ERROR = "ERROR"
 
 
+class KnownBoard(Base):
+    """A job board discovery found, kept so the next screen can use it too.
+
+    Without this the pipeline could only ever screen a hand-written list of
+    companies. When that list runs dry - 53 boards read, 0 eligible postings -
+    the day simply stops short, and the only way it ever grew was someone
+    editing settings.py. Discovery already finds companies by web search and
+    resolves their boards; this is where that work is remembered.
+    """
+
+    __tablename__ = "known_boards"
+    __table_args__ = (UniqueConstraint("user_id", "company", name="uq_board_company"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
+    company: Mapped[str] = mapped_column(String(200), index=True)
+    provider: Mapped[str] = mapped_column(String(32), default="")
+    slug: Mapped[str] = mapped_column(String(200), default="")
+
+    #: How many eligible roles this board has ever yielded, and when it last
+    #: did. A board that has never produced one is still worth re-reading - it
+    #: is free - but this is what tells you which ones are actually working.
+    eligible_seen: Mapped[int] = mapped_column(Integer, default=0)
+    last_yield_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class RunLog(Base):
     """Structured pipeline events, surfaced as the live log in the dashboard."""
 
@@ -482,6 +513,13 @@ class RunJob(Base):
     kind: Mapped[str] = mapped_column(String(16), default="tailor")   # tailor | apply
     job_url: Mapped[str] = mapped_column(String(1024), default="")
     job_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Where the board said the role is. Carried so the location filter can
+    #: be re-applied before tailoring: a row queued under an older, looser
+    #: filter would otherwise reach the browser unchecked.
+    job_location: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    #: How many times this job has been tried. A transient upstream failure
+    #: earns another go; a persistent one must still stop.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, values_callable=lambda e: [m.value for m in e]),

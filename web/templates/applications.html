@@ -2,7 +2,7 @@
 {% block title %}Applications{% endblock %}
 {% block content %}
 <div class="page-head">
-  <div><h1>Applications</h1><p class="sub">Every posting you have tailored for.</p></div>
+  <div><h1>Applications</h1><p class="sub">Postings that cleared every check and reached {{ eligible_threshold|round|int }}%. The rest are under <a href="/applications/not-eligible">Not eligible</a>.</p></div>
 </div>
 
 <div class="card">
@@ -25,9 +25,8 @@
 
 <div class="card">
   <div class="actions-row mb-4">
-    <a class="btn {{ '' if ready_only else 'btn-ghost' }} btn-sm"
-       href="/applications?ready=1">Ready to apply ({{ ready_count }})</a>
-    <a class="btn btn-ghost btn-sm" href="/applications">All</a>
+    <a class="btn btn-sm" href="/applications">Applications ({{ applications|length }})</a>
+    <a class="btn btn-ghost btn-sm" href="/applications/not-eligible">Not eligible ({{ not_eligible_count }})</a>
     {% for status in statuses %}
     <a class="btn btn-ghost btn-sm{{ ' active' if current_status == status.value }}"
        href="/applications?status={{ status.value }}">{{ status.value }}</a>
@@ -42,12 +41,9 @@
       <td class="mono">{{ app.id }}</td>
       <td><a href="/applications/{{ app.id }}">{{ app.company }}</a></td>
       <td>{{ app.role_title }}</td>
-      <td><span class="pill {{ 'pill-good' if app.match_score >= eligible_threshold else 'pill-warn' }}">{{ app.match_score|round(1) }}%</span></td>
+      <td><span class="pill pill-good">{{ app.match_score|round(1) }}%</span></td>
       <td><span class="pill pill-mute">{{ app.status.value }}</span></td>
-      <td>{% if app.id in queued_ids %}<span class="pill pill-good">queued</span>
-          {% elif not app.eligible %}<span class="pill pill-bad"
-              title="{{ app.ineligible_reason }}">not eligible</span>
-          {% endif %}</td>
+      <td>{% if app.id in queued_ids %}<span class="pill pill-good">queued</span>{% endif %}</td>
       <td class="muted">{{ app.created_at|day }}</td>
       <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>
     </tr>
@@ -55,8 +51,9 @@
   </table></div>
   {% else %}
   <p class="empty">
-    {% if ready_only %}Nothing has reached {{ eligible_threshold|round|int }}% yet.
-    {% else %}Nothing yet. Queue some postings above.{% endif %}
+    Nothing has cleared every check at {{ eligible_threshold|round|int }}% yet.
+    {% if not_eligible_count %}<a href="/applications/not-eligible">{{ not_eligible_count }}
+    were ruled out</a> — the reasons are there.{% endif %}
   </p>
   {% endif %}
 </div>

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Not eligible{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Not eligible</h1><p class="sub">Postings that were tailored but cannot
+    be sent, and the reason for each.</p></div>
+</div>
+
+<div class="card">
+  <div class="actions-row mb-4">
+    <a class="btn btn-ghost btn-sm" href="/applications">Applications ({{ ready_count }})</a>
+    <a class="btn btn-sm" href="/applications/not-eligible">Not eligible ({{ applications|length }})</a>
+  </div>
+
+  {% if applications %}
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>Company</th><th>Role</th><th>Match</th><th>Why not</th><th>Created</th><th></th></tr>
+    {% for app in applications %}
+    <tr>
+      <td class="mono">{{ app.id }}</td>
+      <td><a href="/applications/{{ app.id }}">{{ app.company }}</a></td>
+      <td>{{ app.role_title }}</td>
+      <td><span class="pill pill-warn">{{ app.match_score|round(1) }}%</span></td>
+      <td>
+        {% if not app.eligible %}
+          {{ app.ineligible_reason or "failed a hard requirement" }}
+        {% else %}
+          Match {{ app.match_score|round(1) }}% is below the
+          {{ eligible_threshold|round|int }}% bar
+        {% endif %}
+      </td>
+      <td class="muted">{{ app.created_at|day }}</td>
+      <td><a class="btn btn-ghost btn-sm" href="/applications/{{ app.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="empty">Nothing has been ruled out. Everything tailored so far cleared
+    every check.</p>
+  {% endif %}
+</div>
+{% endblock %}

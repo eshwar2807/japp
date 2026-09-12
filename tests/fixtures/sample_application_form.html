@@ -1,6 +1,14 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Careers — Apply</title></head>
 <body>
+<!-- Site chrome. Real careers pages wrap the application in a header search
+     and a footer "check out other roles" widget; both hold text inputs the
+     scanner must never treat as application fields. -->
+<header>
+  <input type="text" name="site_q" placeholder="Search jobs">
+  <input type="text" name="site_loc" placeholder="Location">
+</header>
+
 <h1>Apply: Senior Backend Engineer</h1>
 <form id="application_form">
 
@@ -66,6 +74,52 @@
 
   <label><input type="checkbox" id="agree" name="agree"> I agree to the terms</label>
 
+  <!-- Ashby's shape: a checkbox group whose question lives in the fieldset
+       text rather than a <legend>, and whose boxes are each named after their
+       own option. Ungrouped, a location rule matched the word "City" in
+       "New York City Office" and typed the candidate's home city into it. -->
+  <fieldset class="office-group">
+    <div>Preferred Work Location</div>
+    <div>Select all that apply.</div>
+    <div><input type="checkbox" id="off_sf" name="San Francisco HQ" value="sf">
+         <label for="off_sf">San Francisco HQ</label></div>
+    <div><input type="checkbox" id="off_ny" name="New York City Office" value="ny">
+         <label for="off_ny">New York City Office</label></div>
+    <div><input type="checkbox" id="off_se" name="Seattle Office" value="se">
+         <label for="off_se">Seattle Office</label></div>
+  </fieldset>
+
+  <!-- Plaid's other group puts the hint on the same line as the question. -->
+  <fieldset class="interest-group">
+    <div>Why are you interested in working here? Select all that apply.</div>
+    <div><input type="checkbox" id="int_a" name="Mission" value="a">
+         <label for="int_a">The mission</label></div>
+    <div><input type="checkbox" id="int_b" name="Culture" value="b">
+         <label for="int_b">Company culture</label></div>
+  </fieldset>
+
   <button type="submit" id="submit_app">Submit Application</button>
 </form>
+
+<!-- Toast's shape: a plain sibling <form> holding one search box, sitting in
+     the page body with no header/footer/nav around it and nothing search-like
+     in its class names. Only "the form with the most fields is the
+     application" rejects this one. -->
+<div class="block-job-search-form">
+  <h2>Check out other roles</h2>
+  <form>
+    <div class="input-group">
+      <input type="text" name="query"
+             placeholder="Search by job title, location, department, category, etc.">
+    </div>
+  </form>
+</div>
+
+<footer>
+  <h2>More from us</h2>
+  <form id="job_search">
+    <input type="text" name="footer_loc" placeholder="City, State">
+    <input type="search" name="footer_q" placeholder="Keyword">
+  </form>
+</footer>
 </body></html>

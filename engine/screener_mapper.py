@@ -38,6 +38,7 @@ class AnswerSource(str, enum.Enum):
     LLM = "llm"            # tailoring pass, posting-specific
     MEMORY = "memory"      # something you answered before, reused
     INFERRED = "inferred"  # derived from profile facts, with grounding
+    HUMAN = "human"        # the user answered it themselves when asked
     UNMAPPED = "unmapped"  # escalate to a human
 
 
@@ -402,6 +403,7 @@ class ScreenerMapper:
             )
             return self._match_option(answer, field) if field.options else answer
 
+        answer = None
         rule = self._from_rules(question)
         if rule:
             value, rule_name = rule
@@ -409,7 +411,18 @@ class ScreenerMapper:
                 question=question, value=value, source=AnswerSource.RULE,
                 confidence=1.0, reason=f"master_profile rule '{rule_name}'",
             )
-        else:
+            if field.options:
+                # A rule that produces a value none of the options offer was
+                # simply the wrong tool for this control. "Dublin" answers
+                # "City" well and "Preferred Work Location [San Francisco HQ |
+                # New York City Office | Seattle Office]" not at all. Treating
+                # that as unanswerable sent the question to the user when the
+                # model could have picked from the list, so the ladder carries
+                # on instead of stopping at the first rule that fires.
+                snapped = self._match_option(answer, field)
+                answer = None if snapped.source is AnswerSource.UNMAPPED else snapped
+
+        if answer is None:
             remembered = self._from_memory(question)
             llm = self._from_llm(question) if remembered is None else None
             if remembered:

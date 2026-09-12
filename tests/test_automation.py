@@ -31,6 +31,23 @@ from engine.screener_mapper import FieldType
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_application_form.html"
 
 
+def _browser_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as p:
+            return Path(p.chromium.executable_path).exists()
+    except Exception:
+        return False
+
+
+requires_browser = pytest.mark.skipif(
+    not _browser_available(), reason="Chromium not installed (run: playwright install chromium)"
+)
+
+
 # ---------------- timing ----------------
 
 
@@ -94,6 +111,83 @@ def test_captcha_signatures_cover_the_major_vendors():
         assert vendor in joined
 
 
+# ---------------- telling a challenge from a badge ----------------
+#
+# Greenhouse puts invisible reCAPTCHA v3 on every posting. Matching the vendor
+# selector alone parked every run on pages whose only control was an Apply
+# button, and the handoff could never clear it because an invisible widget
+# never goes away. These fixtures are the markup Google actually ships.
+
+_V3_BADGE = """
+<div class="grecaptcha-badge" style="width:256px;height:60px;position:fixed;
+     bottom:14px;right:14px;">
+  <div class="grecaptcha-logo">
+    <iframe title="reCAPTCHA" width="256" height="60"
+      src="https://www.google.com/recaptcha/api2/anchor?k=abc&size=invisible"></iframe>
+  </div>
+</div>
+<div style="visibility:hidden;position:absolute;top:-10000px;">
+  <iframe width="400" height="580"
+    src="https://www.google.com/recaptcha/api2/bframe?k=abc&size=invisible"></iframe>
+</div>
+<div class="g-recaptcha" data-sitekey="abc" data-size="invisible"></div>
+"""
+
+_V2_CHECKBOX = """
+<div class="g-recaptcha" data-sitekey="abc">
+  <iframe title="reCAPTCHA" width="304" height="78"
+    src="https://www.google.com/recaptcha/api2/anchor?k=abc"></iframe>
+</div>
+"""
+
+_V3_CHALLENGE_SHOWN = _V3_BADGE.replace(
+    "visibility:hidden;position:absolute;top:-10000px;",
+    "visibility:visible;position:fixed;top:40px;left:40px;",
+)
+
+_HCAPTCHA = """
+<div class="h-captcha" data-sitekey="abc" style="width:303px;height:78px;">
+  <iframe title="widget containing checkbox for hCaptcha security challenge"
+    width="303" height="78" src="https://newassets.hcaptcha.com/captcha/v1/x/frame"></iframe>
+</div>
+"""
+
+
+def _scan(html: str):
+    from playwright.sync_api import sync_playwright
+
+    from automation.stealth_browser import CAPTCHA_SCAN_JS
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        # Never let the fixture reach the network; only the markup matters.
+        page.route("**/*", lambda route: route.abort())
+        page.set_content(f"<body><h1>Senior Engineer</h1><button>Apply</button>{html}</body>")
+        found = page.evaluate(CAPTCHA_SCAN_JS)
+        browser.close()
+    return found
+
+
+@requires_browser
+def test_an_invisible_v3_widget_is_not_a_challenge():
+    """The bug that stopped every Greenhouse run: a badge is not a question."""
+    assert _scan(_V3_BADGE) is None
+
+
+@requires_browser
+def test_a_page_with_no_captcha_at_all_is_clear():
+    assert _scan("") is None
+
+
+@requires_browser
+@pytest.mark.parametrize("html", [_V2_CHECKBOX, _HCAPTCHA, _V3_CHALLENGE_SHOWN])
+def test_a_real_challenge_is_still_caught(html):
+    """Loosening detection must not let a genuine challenge through: the run
+    would carry on and submit into a form the employer never accepted."""
+    assert _scan(html) is not None
+
+
 # ---------------- driver routing ----------------
 
 
@@ -121,23 +215,6 @@ def test_workday_is_checked_before_greenhouse():
 # ---------------- live form scanning ----------------
 
 
-def _browser_available() -> bool:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return False
-    try:
-        with sync_playwright() as p:
-            return Path(p.chromium.executable_path).exists()
-    except Exception:
-        return False
-
-
-requires_browser = pytest.mark.skipif(
-    not _browser_available(), reason="Chromium not installed (run: playwright install chromium)"
-)
-
-
 @pytest.fixture(scope="module")
 def scanned_fields():
     """Run the real field scanner against the fixture form."""
@@ -163,6 +240,32 @@ def test_scanner_resolves_labels_through_every_fallback(scanned_fields):
     assert "LinkedIn" in labels["urls[LinkedIn]"]                        # wrapping label
     assert "legally authorized" in labels["work_auth"]                   # aria-labelledby
     assert labels["gender"] == "Gender"                                  # fieldset legend
+
+
+@requires_browser
+@requires_browser
+def test_scanner_ignores_site_search_boxes(scanned_fields):
+    """The agent typed a city into a careers-page footer search box because the
+    scan covered the whole document. Only the application form counts."""
+    names = {f["name"] for f in scanned_fields}
+    assert not names & {"site_q", "site_loc", "footer_loc", "footer_q"}
+
+
+@requires_browser
+def test_a_bare_sibling_search_form_is_not_the_application(scanned_fields):
+    """Toast's careers page puts its "check out other roles" search in a plain
+    <form> in the page body - no header, footer or nav around it, nothing
+    search-like in its class names. The agent typed a city into it. Only
+    picking the form with the most fields rejects this one.
+    """
+    assert "query" not in {f["name"] for f in scanned_fields}
+
+
+@requires_browser
+def test_scanner_still_sees_every_application_field(scanned_fields):
+    """Scoping must narrow the scan, not shrink it."""
+    names = {f["name"] for f in scanned_fields}
+    assert {"job_application[first_name]", "email", "phone", "gender"} <= names
 
 
 @requires_browser
@@ -283,3 +386,51 @@ def test_form_inside_an_iframe_is_scannable():
     names = {f["name"] for f in fields}
     assert "job_application[first_name]" in names
     assert "resume" in names
+
+
+# ---------------- checkbox groups ----------------
+#
+# Ashby writes a multi-select as a fieldset of checkboxes, each named after its
+# own option and with the question in plain text rather than a <legend>.
+# Ungrouped, the scanner reported three fields labelled "San Francisco HQ",
+# "New York City Office" and "Seattle Office", none carrying any options. A
+# location rule then matched the word "City" and typed the candidate's home
+# city into a checkbox.
+
+
+@requires_browser
+def test_a_checkbox_group_is_one_question_not_one_field_per_box(scanned_fields):
+    labels = [f["label"] for f in scanned_fields]
+    assert "Preferred Work Location" in labels
+    assert "New York City Office" not in labels
+
+
+@requires_browser
+def test_a_checkbox_group_carries_its_options(scanned_fields):
+    """Without options the mapper cannot reject an answer that fits none of
+    them, which is what let a home city be written into an office choice."""
+    group = next(f for f in scanned_fields if f["label"] == "Preferred Work Location")
+    assert group["options"] == [
+        "San Francisco HQ", "New York City Office", "Seattle Office"]
+    assert group["field_type"] == "radio"      # answered from its options
+
+
+@requires_browser
+def test_the_group_question_excludes_the_select_all_hint(scanned_fields):
+    group = next(f for f in scanned_fields if f["label"] == "Preferred Work Location")
+    assert "select all that apply" not in group["label"].lower()
+
+
+@requires_browser
+def test_a_lone_checkbox_keeps_its_own_label(scanned_fields):
+    """Grouping must not swallow a standalone consent box."""
+    labels = [f["label"] for f in scanned_fields]
+    assert any("agree to the terms" in label.lower() for label in labels)
+
+
+@requires_browser
+def test_a_hint_on_the_question_line_is_trimmed(scanned_fields):
+    """Plaid writes "Why are you interested in working at Plaid? Select all
+    that apply." as one line. The hint is not part of the question."""
+    labels = [f["label"] for f in scanned_fields]
+    assert "Why are you interested in working here?" in labels

@@ -296,10 +296,10 @@ class ResumeImporter:
     @property
     def client(self) -> Any:
         if self._client is None:
-            import anthropic
+            from engine.llm import make_client
 
             key = self.api_key or settings.ANTHROPIC_API_KEY
-            self._client = anthropic.Anthropic(**({"api_key": key} if key else {})).messages
+            self._client = make_client(key).messages
         return self._client
 
     def _section(self, text: str, instruction: str, schema: type, phase: str) -> Any:

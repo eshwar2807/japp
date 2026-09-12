@@ -18,7 +18,9 @@ from config import settings
 from database.db_manager import DBManager
 from database.models import ActionKind, ActionStatus, ApplicationStatus
 
-GOOD_PASSWORD = "Correct-Horse-9x!"
+# `web`, `signup` and the password live in conftest so other suites can
+# drive the dashboard without importing this module for its fixtures.
+from tests.conftest import GOOD_PASSWORD, signup  # noqa: E402,F401
 
 
 def _ready_profile() -> dict:
@@ -41,57 +43,6 @@ def _ready_profile() -> dict:
     return profile
 OTHER_PASSWORD = "Battery-Staple-7z!"
 
-
-@pytest.fixture()
-def web(tmp_path, monkeypatch):
-    """A dashboard wired to a throwaway database and vault."""
-    monkeypatch.setattr(settings, "DB_URL", f"sqlite:///{tmp_path/'web.db'}")
-    monkeypatch.setattr(settings, "KEY_PATH", tmp_path / "vault.key")
-    monkeypatch.setattr(settings, "SECRET_KEY", "test-secret-key-not-for-real-use")
-    monkeypatch.setattr(settings, "COOKIE_SECURE", False)
-    monkeypatch.setattr(settings, "ALLOW_SIGNUP", True)
-    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "out")
-    # Tests must not behave differently because a developer happens to have a
-    # key in their environment: the per-user vault is the only source here.
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", None)
-
-    # Same key resolution as the app, so both share one vault.
-    db = DBManager(db_url=settings.DB_URL)
-
-    import web.deps as deps
-
-    deps.get_db.cache_clear()
-    deps.get_sessions.cache_clear()
-    deps.get_limiter.cache_clear()
-    # The worker is cached too. Without clearing it, every web test reuses one
-    # dispatcher bound to a database from the first test that ran, polling
-    # several times a second for the rest of the suite and competing with the
-    # concurrency tests.
-    deps.get_worker.cache_clear()
-    monkeypatch.setattr(deps, "get_db", lambda: db)
-
-    from web.app import create_app
-
-    app = create_app()
-    app.dependency_overrides[deps.get_db] = lambda: db
-    client = TestClient(app, follow_redirects=False)
-    client.db = db
-    yield client
-
-    # Stop whatever the app's lifespan started, so no dispatcher outlives the
-    # test that created it.
-    worker = deps.get_worker()
-    worker.stop(timeout=2)
-    deps.get_worker.cache_clear()
-
-
-def signup(client, email: str, password: str = GOOD_PASSWORD):
-    client.get("/login")  # obtain a CSRF cookie
-    token = client.cookies.get("jp_csrf")
-    return client.post(
-        "/signup",
-        data={"email": email, "password": password, "confirm": password, "csrf_token": token},
-    )
 
 
 def _form_token(client, path: str) -> str:
@@ -237,8 +188,11 @@ def test_post_with_wrong_csrf_token_is_rejected(web):
 def two_users(web):
     signup(web, "ada@example.com")
     ada = web.db.get_user_by_email("ada@example.com")
+    # Scores above the bar so this lands on /applications: the test is about
+    # whose applications are visible, not about which tab they sit in.
     app_a = web.db.create_application(
-        company="Acme", role_title="Engineer", job_url="https://x.com/1", user_id=ada.id)
+        company="Acme", role_title="Engineer", job_url="https://x.com/1",
+        match_score=88.0, user_id=ada.id)
 
     other = TestClient(web.app, follow_redirects=False)
     signup(other, "eve@example.com")
@@ -1270,13 +1224,49 @@ def test_the_ready_filter_shows_only_what_can_be_applied_to(web):
     assert "NoSponsor" not in page      # high score, cannot be applied to
 
 
-def test_the_full_list_still_shows_everything(web):
+def test_a_posting_below_the_bar_is_not_in_the_applications_tab(web):
+    """The tab holds what can actually be sent. A 52% draft cannot."""
     signup(web, "ada@example.com")
     user = web.db.get_user_by_email("ada@example.com")
     web.db.create_application(company="LowScore", role_title="Java Engineer",
                               job_url="https://x.com/2", match_score=52.0, user_id=user.id)
 
-    assert "LowScore" in web.get("/applications").text
+    assert "LowScore" not in web.get("/applications").text
+
+
+def test_a_posting_below_the_bar_appears_under_not_eligible_with_its_score(web):
+    """Ruled out, not discarded - the score is why, and it is worth seeing."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    web.db.create_application(company="LowScore", role_title="Java Engineer",
+                              job_url="https://x.com/2", match_score=52.0, user_id=user.id)
+
+    page = web.get("/applications/not-eligible").text
+    assert "LowScore" in page
+    assert "52.0%" in page
+    assert "below the" in page
+
+
+def test_the_two_tabs_are_exact_complements(web):
+    """Nothing may fall between them and disappear from both."""
+    signup(web, "ada@example.com")
+    user = web.db.get_user_by_email("ada@example.com")
+    for name, score, ok in [("Passing", 88.0, True), ("LowScore", 52.0, True),
+                            ("NoSponsor", 95.0, False), ("Both", 40.0, False)]:
+        web.db.create_application(
+            company=name, role_title="Java Engineer", job_url=f"https://x.com/{name}",
+            match_score=score, user_id=user.id, eligible=ok,
+            ineligible_reason="" if ok else "employer states they will not sponsor")
+
+    passing = web.get("/applications").text
+    failing = web.get("/applications/not-eligible").text
+
+    for name in ("Passing", "LowScore", "NoSponsor", "Both"):
+        in_passing = f">{name}<" in passing
+        in_failing = f">{name}<" in failing
+        assert in_passing != in_failing, f"{name} is in both tabs or neither"
+
+    assert ">Passing<" in passing
 
 
 def test_the_list_marks_which_applications_are_queued(web):
@@ -1300,9 +1290,14 @@ def test_an_ineligible_application_shows_why(web):
                               eligible=False,
                               ineligible_reason="employer states they will not sponsor")
 
-    page = web.get("/applications").text
-    assert "not eligible" in page
+    # The reason is the point of the tab, so it is spelled out rather than
+    # hidden in a tooltip the way the old pill did it.
+    page = web.get("/applications/not-eligible").text
+    assert "Branch" in page
     assert "will not sponsor" in page
+
+    # And it is kept out of the tab for sendable applications entirely.
+    assert "Branch" not in web.get("/applications").text
 
 
 def test_ready_applications_are_ordered_best_first(web):
@@ -1315,3 +1310,25 @@ def test_ready_applications_are_ordered_best_first(web):
 
     scores = [a.match_score for a in web.db.list_applications(user_id=user.id, ready_only=True)]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_the_not_eligible_tab_is_in_the_nav(web):
+    """It is a place things end up without being asked for, so it has to be
+    findable rather than only linked from the tab it replaced."""
+    signup(web, "ada@example.com")
+    assert '/applications/not-eligible' in web.get("/applications").text
+
+
+def test_the_not_eligible_page_is_scoped_to_the_user(two_users):
+    web, other, ada, _, _ = two_users
+    web.db.create_application(company="SecretCo", role_title="Engineer",
+                              job_url="https://x.com/9", match_score=10.0,
+                              user_id=ada.id)
+
+    assert "SecretCo" in web.get("/applications/not-eligible").text
+    assert "SecretCo" not in other.get("/applications/not-eligible").text
+
+
+def test_an_empty_not_eligible_page_says_so(web):
+    signup(web, "ada@example.com")
+    assert "Nothing has been ruled out" in web.get("/applications/not-eligible").text

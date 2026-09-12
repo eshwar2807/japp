@@ -34,6 +34,50 @@ from automation.notifier import Notice, Notifier, block_notice
 from config import settings
 from database.models import ActionKind, BlockMode, JobStatus, LogLevel
 
+#: How many times a job may be retried before it is called a real failure.
+MAX_JOB_ATTEMPTS = 3
+
+#: Errors that describe the weather rather than the job. Matched on text
+#: because they arrive from several libraries - the Anthropic SDK, httpx, the
+#: standard library - with no shared base class to catch.
+_TRANSIENT_SIGNS = (
+    "overloaded",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "temporarily unavailable",
+    "please retry",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "connection error",
+    "remote end closed",
+    "service unavailable",
+    "bad gateway",
+    "internal server error",
+    " 429",
+    " 500",
+    " 502",
+    " 503",
+    " 504",
+)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Whether an error is worth trying again.
+
+    Deliberately conservative about what counts: a bad API key, a malformed
+    request or a schema that is too complex will fail identically every time,
+    and retrying those just spends money to reach the same place.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "authentication" in text or "invalid api key" in text or "api key is invalid" in text:
+        return False
+    if "invalid_request" in text or "schema is too complex" in text:
+        return False
+    return any(sign in text for sign in _TRANSIENT_SIGNS)
+
 log = logging.getLogger(__name__)
 
 #: Concurrent actively-running jobs. Parked jobs do not count against this.
@@ -395,7 +439,12 @@ class QueueWorker:
             log.exception("Could not send spend-cap notice")
 
     def _maybe_topup(self) -> None:
-        """Queue the daily top-up for users whose hour has come."""
+        """Queue a top-up: the scheduled one, or another to close a shortfall.
+
+        The day's target is a target, not a single attempt at it. A run that
+        fell short used to leave the gap until the next morning, so it only
+        ever got closed by the user noticing and asking.
+        """
         now = time.monotonic()
         if now - self._last_topup_check < 60:
             return
@@ -411,10 +460,14 @@ class QueueWorker:
             try:
                 # Recorded before queueing, so a failure cannot make it fire
                 # repeatedly for the rest of the day.
+                ready = self.db.eligible_today(user_id)
+                run_no = self.db.topup_runs_today(user_id) + 1
                 self.db.mark_topup_run(user_id)
                 job = self.db.enqueue_job(user_id, kind="topup")
-                self.db.log_event(user_id, "topup_scheduled",
-                                  f"Daily top-up queued as job #{job.id}")
+                self.db.log_event(
+                    user_id, "topup_scheduled",
+                    f"Top-up queued as job #{job.id} (run {run_no} today; "
+                    f"{ready}/{settings.DAILY_APPLICATION_CAP} ready)")
             except Exception:
                 log.exception("Could not queue top-up for user %s", user_id)
 
@@ -509,10 +562,28 @@ class QueueWorker:
             self.db.finish_job(job_id, JobStatus.CANCELLED, str(exc))
 
         except Exception as exc:
-            log.exception("Job %s failed", job_id)
-            self.db.finish_job(job_id, JobStatus.FAILED, str(exc)[:500])
-            self.db.log_event(user_id, "job_failed", str(exc), level=LogLevel.ERROR)
-            self._notify_block(user_id, job_id, str(exc)[:200], "run failed")
+            # A failure that says nothing about this job - an upstream
+            # overload, a network blip - is worth another go. Six tailoring
+            # jobs were lost in one burst to "503 overloaded_error: ... Please
+            # retry", each one a posting the user never got to see.
+            job = self.db.get_job(job_id)
+            tried = (job.attempts or 0) if job else 0
+            if is_transient(exc) and tried < MAX_JOB_ATTEMPTS:
+                attempt = self.db.retry_job(
+                    job_id, f"Attempt {tried + 1} hit a transient error; requeued")
+                log.warning("Job %s hit a transient error (attempt %s): %s",
+                            job_id, attempt, exc)
+                self.db.log_event(
+                    user_id, "job_retry",
+                    f"Job #{job_id}: {str(exc)[:160]} - requeued "
+                    f"(attempt {attempt} of {MAX_JOB_ATTEMPTS})",
+                    level=LogLevel.WARNING,
+                )
+            else:
+                log.exception("Job %s failed", job_id)
+                self.db.finish_job(job_id, JobStatus.FAILED, str(exc)[:500])
+                self.db.log_event(user_id, "job_failed", str(exc), level=LogLevel.ERROR)
+                self._notify_block(user_id, job_id, str(exc)[:200], "run failed")
 
         finally:
             self.registry.forget(job_id)

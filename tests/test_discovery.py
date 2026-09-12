@@ -55,6 +55,89 @@ def posting(**kw):
     return Posting(**{**base, **kw})
 
 
+# ---------------- the URL the browser is actually sent to ----------------
+#
+# A board returns whatever link the employer configured, and a large employer
+# configures their own careers site. Stripe's Greenhouse board returns
+# stripe.com/jobs/search?gh_jid=7217048: a marketing page listing every open
+# role, with no form anywhere on it. Opening that produced "no resume input",
+# "1 field discovered" and "submit button not found" - none of them
+# form-filling faults, all of them the wrong page.
+
+
+def test_an_employer_careers_link_is_replaced_by_the_ats_form():
+    p = posting(company="stripe", slug="stripe", external_id="7217048",
+                url="https://stripe.com/jobs/search?gh_jid=7217048")
+    assert p.apply_url == ("https://job-boards.greenhouse.io/embed/job_app"
+                           "?for=stripe&token=7217048")
+
+
+def test_the_employer_link_is_still_kept_for_a_human_to_read():
+    """The marketing page is the better thing to show a person; it is only
+    unusable as an automation target."""
+    p = posting(url="https://stripe.com/jobs/search?gh_jid=7217048")
+    assert p.url == "https://stripe.com/jobs/search?gh_jid=7217048"
+
+
+@pytest.mark.parametrize("board,slug,job_id,expected", [
+    ("greenhouse", "flexport", "7975365",
+     "https://job-boards.greenhouse.io/embed/job_app?for=flexport&token=7975365"),
+    ("lever", "acme", "abc-123", "https://jobs.lever.co/acme/abc-123/apply"),
+    ("ashby", "acme", "uuid-1", "https://jobs.ashbyhq.com/acme/uuid-1/application"),
+    ("smartrecruiters", "acme", "744000", "https://jobs.smartrecruiters.com/acme/744000"),
+    ("workable", "acme", "A1B2C3", "https://apply.workable.com/acme/j/A1B2C3/apply/"),
+])
+def test_every_board_resolves_to_its_own_apply_host(board, slug, job_id, expected):
+    assert posting(board=board, slug=slug, external_id=job_id,
+                   url="https://careers.acme.com/roles/1").apply_url == expected
+
+
+def test_the_display_name_is_not_used_as_the_board_slug():
+    """Ashby and Workable report a company display name, which is not a valid
+    path segment. Using it would build a 404."""
+    p = posting(company="Acme Corporation, Inc.", slug="acme",
+                board="ashby", external_id="u1")
+    assert p.apply_url == "https://jobs.ashbyhq.com/acme/u1/application"
+
+
+@pytest.mark.parametrize("kw", [
+    {"board": ""},                    # found by web search, not a board
+    {"external_id": ""},              # nothing to address
+    {"board": "workday"},             # no public pattern to build
+    {"slug": ""},                     # never guess one from the company name
+])
+def test_an_unbuildable_url_falls_back_rather_than_guessing(kw):
+    p = posting(url="https://careers.acme.com/roles/1", **kw)
+    assert p.apply_url == "https://careers.acme.com/roles/1"
+
+
+@pytest.mark.parametrize("stored", [
+    "https://stripe.com/jobs/search?gh_jid=7217048",
+    "https://stripe.com/careers/search?gh_jid=7217048",
+    "https://boards.eu.example.com/careers?foo=bar&gh_jid=7217048&utm_source=x",
+])
+def test_a_stored_careers_link_is_repaired_from_its_job_id(stored):
+    """Applications queued before apply_url existed still hold the employer's
+    page. A Greenhouse job id is globally unique, so the form is recoverable
+    without knowing which board it came from."""
+    from engine.boards import canonicalize_apply_url
+
+    assert canonicalize_apply_url(stored) == (
+        "https://boards.greenhouse.io/embed/job_app?token=7217048")
+
+
+@pytest.mark.parametrize("stored", [
+    "https://job-boards.greenhouse.io/flexport/jobs/7975365",
+    "https://jobs.lever.co/acme/abc-123/apply",
+    "https://acme.wd1.myworkdayjobs.com/en-US/careers/job/x",
+    "",
+])
+def test_a_url_with_nothing_to_repair_is_left_alone(stored):
+    from engine.boards import canonicalize_apply_url
+
+    assert canonicalize_apply_url(stored) == stored
+
+
 # ---------------- board detection ----------------
 
 
@@ -392,8 +475,13 @@ def test_discovery_queues_tailor_jobs_with_descriptions_attached(db, user, monke
         def run(self, criteria, already_applied=(), seen_keys=None, **kw):
             return {
                 "companies": [CompanySuggestion(name="Acme")],
-                "postings": [posting(external_id="1", description="Python and Kubernetes."),
-                             posting(external_id="2", url="https://boards.greenhouse.io/acme/jobs/2",
+                # Different employers: one application per company is the cap,
+                # so same-company postings would collapse to one and this test
+                # is about descriptions, not that rule.
+                "postings": [posting(external_id="1", company="Acme",
+                                     description="Python and Kubernetes."),
+                             posting(external_id="2", company="Globex",
+                                     url="https://boards.greenhouse.io/globex/jobs/2",
                                      description="Go and gRPC.")],
                 "problems": [],
                 "notes": "",
@@ -449,8 +537,10 @@ def test_discovery_respects_the_daily_screening_cap(db, user, monkeypatch):
 
         def run(self, criteria, already_applied=(), seen_keys=None, **kw):
             return {"companies": [],
-                    "postings": [posting(external_id=str(i),
-                                         url=f"https://boards.greenhouse.io/acme/jobs/{i}")
+                    # One per employer, so the screening cap is what limits
+                    # this and not the per-company cap.
+                    "postings": [posting(external_id=str(i), company=f"Co{i}",
+                                         url=f"https://boards.greenhouse.io/co{i}/jobs/{i}")
                                  for i in range(10)],
                     "problems": [], "notes": ""}
 
@@ -677,6 +767,58 @@ def test_screening_is_budgeted_separately_from_applications(db, user, monkeypatc
     assert settings.DAILY_SCREEN_CAP > settings.DAILY_APPLICATION_CAP
 
 
+def test_a_foreign_posting_already_queued_is_dropped_before_it_costs_anything(db, user):
+    """Discovery filters location, but rows queued under an older filter are
+    still in the queue after it is fixed. A Vietnam-only Java role reached the
+    browser that way, so the check is repeated here where the spending starts.
+    """
+    from web.runner import run_tailor_job
+
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    db.save_discovery_criteria(user.id, {"titles": ["Java"],
+                                         "locations": ["United States"]})
+    job = db.enqueue_job(
+        user.id, kind="tailor",
+        job_url="https://job-boards.greenhouse.io/aperiasolutions/jobs/5206595007",
+        job_location="Danang, Danang, Vietnam; Ho Chi Minh City, Vietnam",
+        job_description="Senior Fullstack Java Developer. Spring Boot. 4+ years.")
+
+    run_tailor_job(db, job.id, user.id, gatekeeper=None)
+
+    assert "not a requested location" in db.get_job(job.id).message.lower()
+    assert db.applications_today(user.id) == 0
+
+
+def test_a_us_posting_already_queued_is_not_dropped(db, user, monkeypatch):
+    """The backstop must not start rejecting the roles we want. Tailoring is
+    stubbed out: what is under test is that the run reaches it at all."""
+    from web.runner import run_tailor_job
+
+    reached = []
+
+    class Reached(RuntimeError):
+        pass
+
+    def stop_here(self, *a, **kw):
+        reached.append(True)
+        raise Reached("got past the location gate")
+
+    monkeypatch.setattr("engine.ats_optimizer.ATSOptimizer.run", stop_here)
+
+    db.set_anthropic_key(user.id, "sk-ant-test")
+    db.save_discovery_criteria(user.id, {"titles": ["Java"],
+                                         "locations": ["United States"]})
+    job = db.enqueue_job(
+        user.id, kind="tailor", job_url="https://x.com/1",
+        job_location="Austin, TX",
+        job_description="Senior Java Engineer. Spring Boot, REST APIs. 4+ years.")
+
+    with pytest.raises(Reached):
+        run_tailor_job(db, job.id, user.id, gatekeeper=None)
+
+    assert reached, "the location backstop rejected a US posting"
+
+
 def test_tailoring_stops_once_the_application_cap_is_reached(db, user, monkeypatch):
     """The queue keeps its remaining postings for tomorrow rather than
     tailoring past the cap."""
@@ -884,3 +1026,390 @@ def test_the_topup_does_nothing_when_the_target_is_already_met(db, user, monkeyp
 
     assert "nothing to top up" in db.get_job(job.id).message
     assert [j for j in db.list_jobs(user_id=user.id) if j.kind == "tailor"] == []
+
+
+def test_a_midnight_topup_hour_is_honoured(db):
+    """Hour 0 is falsy, so `topup_hour or 3` quietly moved a midnight top-up to
+    three in the morning. The same mistake was fixed once already for the
+    digest hour; this is the one that was left."""
+    from datetime import datetime, timezone as tz
+
+    user = db.create_user("midnight@example.com", "$argon2id$fake")
+    db.update_user(user.id, topup_enabled=True, timezone="UTC",
+                   notify_utc_offset_minutes=0, topup_hour=0)
+
+    # At any hour of the day, a midnight schedule has already come round.
+    assert datetime.now(tz.utc).hour >= 0
+    assert db.users_due_for_topup() == [user.id]
+
+
+# ---------------- one resume per recruiter ----------------
+#
+# Every application is tailored to its own posting, so two roles at one company
+# means two differently-emphasised resumes in front of the same recruiter - an
+# ATS keys candidates by email and shows them together. The comment in the
+# discovery path claimed "never queue a company already applied to", but the
+# exclusion list was only pasted into the prompt as a request to the model.
+# Four Databricks postings, two Stripe and two Tebra reached the queue.
+
+
+def test_a_second_role_at_the_same_company_is_not_queued(db, user, monkeypatch):
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    db.create_application(company="Databricks", role_title="Backend Engineer",
+                          job_url="https://x.com/1", user_id=user.id)
+
+    kept = _within_company_cap(db, user.id, [posting(company="Databricks")])
+
+    assert kept == []
+
+
+def test_one_run_cannot_queue_several_roles_at_one_company(db, user, monkeypatch):
+    """The count has to move as the run goes, or every posting is checked
+    against the same starting number and all of them pass."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    postings = [posting(company="Databricks", external_id=str(i)) for i in range(4)]
+
+    kept = _within_company_cap(db, user.id, postings)
+
+    assert len(kept) == 1
+
+
+def test_other_companies_are_unaffected(db, user, monkeypatch):
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    db.create_application(company="Databricks", role_title="Backend Engineer",
+                          job_url="https://x.com/1", user_id=user.id)
+
+    kept = _within_company_cap(db, user.id, [
+        posting(company="Databricks"), posting(company="Stripe"),
+        posting(company="Toast"),
+    ])
+
+    assert sorted(p.company for p in kept) == ["Stripe", "Toast"]
+
+
+def test_the_company_name_is_matched_case_and_space_insensitively(db, user, monkeypatch):
+    """Boards spell the same employer several ways."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    db.create_application(company="databricks", role_title="Engineer",
+                          job_url="https://x.com/1", user_id=user.id)
+
+    assert _within_company_cap(db, user.id, [posting(company="  Databricks ")]) == []
+
+
+def test_the_cap_is_configurable(db, user, monkeypatch):
+    """Someone may decide two at a large employer is fine."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 2)
+    postings = [posting(company="Databricks", external_id=str(i)) for i in range(4)]
+
+    assert len(_within_company_cap(db, user.id, postings)) == 2
+
+
+def test_a_posting_with_no_company_name_is_not_dropped(db, user, monkeypatch):
+    """An unnamed employer cannot be shown to have been applied to already."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    assert len(_within_company_cap(db, user.id, [posting(company="")])) == 1
+
+
+def test_dropping_a_posting_is_logged_not_silent(db, user, monkeypatch):
+    """A posting vanishing from the queue with no explanation is the thing that
+    made the location bug so hard to see."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    _within_company_cap(db, user.id, [posting(company="Databricks", external_id=str(i))
+                                      for i in range(3)])
+
+    events = [e for e in db.list_logs(user_id=user.id, limit=20)
+              if e.event == "company_cap"]
+    assert events and "Databricks" in events[0].message
+
+
+def test_drafts_count_towards_the_cap(db, user, monkeypatch):
+    """A queued draft is just as much a second resume as a submitted one."""
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 1)
+    db.create_application(company="Stripe", role_title="Engineer",
+                          job_url="https://x.com/1", user_id=user.id,
+                          match_score=20.0)
+
+    assert _within_company_cap(db, user.id, [posting(company="Stripe")]) == []
+
+
+# ---------------- one resume per employer, reused ----------------
+#
+# A second role at a company already applied to goes out on the resume that
+# company already has - not a freshly tailored variant. Two differently
+# emphasised resumes are two versions of one person to a recruiter who sees
+# both. It follows that the 70% bar must be measured against the resume that
+# will actually be sent, not against one built for this posting.
+
+
+def _stored_resume(db, user, company="Databricks", skills=("Java", "Spring Boot")):
+    payload = {
+        "summary": "Backend engineer building Java services.",
+        "highlighted_skills": list(skills),
+        "tailored_experience": [{
+            "title": "Senior Engineer", "company": "Acme",
+            "start_date": "2020-01",
+            "bullets": ["Built Java and Spring Boot services on Kubernetes."],
+        }],
+        "ats_match_percentage": 88.0,
+    }
+    return db.create_application(
+        company=company, role_title="Backend Engineer",
+        job_url="https://boards.greenhouse.io/databricks/jobs/1",
+        match_score=88.0, tailored_payload=payload,
+        resume_pdf_path="/tmp/prior.pdf", user_id=user.id)
+
+
+def test_the_resume_already_sent_is_the_one_looked_up(db, user):
+    prior = _stored_resume(db, user)
+    found = db.resume_for_company("Databricks", user_id=user.id)
+    assert found is not None and found.id == prior.id
+
+
+def test_the_lookup_ignores_case_and_padding(db, user):
+    _stored_resume(db, user, company="databricks")
+    assert db.resume_for_company("  Databricks ", user_id=user.id) is not None
+
+
+def test_an_employer_never_applied_to_has_no_stored_resume(db, user):
+    _stored_resume(db, user)
+    assert db.resume_for_company("Stripe", user_id=user.id) is None
+
+
+def test_one_users_resume_is_not_offered_to_another(db, user):
+    _stored_resume(db, user)
+    other = db.create_user("eve@example.com", "$argon2id$fake")
+    assert db.resume_for_company("Databricks", user_id=other.id) is None
+
+
+def test_an_application_with_no_resume_is_not_offered_for_reuse(db, user):
+    """A row that only got as far as being queued has nothing to reuse."""
+    db.create_application(company="Stripe", role_title="Engineer",
+                          job_url="https://x.com/1", user_id=user.id)
+    assert db.resume_for_company("Stripe", user_id=user.id) is None
+
+
+def test_the_stored_resume_is_scored_against_the_new_posting(db, user):
+    """The bar applies to the resume that will be sent. A stored resume full of
+    Java scores well on a Java posting and badly on a Go one, and that
+    difference is the whole point of checking."""
+    from engine.ats_optimizer import score_match
+    from engine.schemas import JDKeywords, TailoredResumeSchema
+    import json as _json
+
+    prior = _stored_resume(db, user)
+    resume = TailoredResumeSchema.model_validate(_json.loads(prior.tailored_payload))
+
+    java = JDKeywords(role_title="Java Engineer", company="Databricks",
+                      hard_skills=[], tooling=["Java", "Spring Boot"], soft_skills=[])
+    rust = JDKeywords(role_title="Rust Engineer", company="Databricks",
+                      hard_skills=[], tooling=["Rust", "WebAssembly"], soft_skills=[])
+
+    assert score_match(java, resume)[0] > score_match(rust, resume)[0]
+
+
+def test_the_company_cap_is_off_by_default():
+    """Capping at one rejected every posting worth screening, because almost
+    every board had already been applied to once."""
+    assert settings.MAX_APPLICATIONS_PER_COMPANY == 0
+
+
+def test_a_cap_of_zero_lets_every_posting_through(db, user, monkeypatch):
+    from web.runner import _within_company_cap
+
+    monkeypatch.setattr(settings, "MAX_APPLICATIONS_PER_COMPANY", 0)
+    db.create_application(company="Databricks", role_title="Engineer",
+                          job_url="https://x.com/1", user_id=user.id)
+
+    postings = [posting(company="Databricks", external_id=str(i)) for i in range(4)]
+    assert len(_within_company_cap(db, user.id, postings)) == 4
+
+
+# ---------------- the target is a target, not one attempt ----------------
+#
+# A top-up ran once a day. When it fell short - 11/20, then 19/20 - the gap sat
+# there until the next morning, and the only thing that ever closed it was the
+# user noticing and asking. That is the whole complaint: it should be
+# automatic. So a run that leaves the day short schedules another one.
+
+
+def _topup_ready_user(db, ran_minutes_ago=60):
+    from datetime import datetime, timedelta, timezone as tz
+
+    user = db.create_user("topup2@example.com", "$argon2id$fake")
+    db.update_user(user.id, topup_enabled=True, timezone="UTC",
+                   notify_utc_offset_minutes=0, topup_hour=0)
+    db.update_user(user.id, last_topup_at=datetime.now(tz.utc).replace(tzinfo=None)
+                   - timedelta(minutes=ran_minutes_ago))
+    return db.get_user(user.id)
+
+
+def test_a_short_day_schedules_another_run(db, monkeypatch):
+    """The bug in one test: already ran today, still short, must run again."""
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+    user = _topup_ready_user(db)
+
+    assert db.users_due_for_topup() == [user.id]
+
+
+def test_a_met_target_does_not_schedule_more(db, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 2)
+    user = _topup_ready_user(db)
+    for i in range(2):
+        db.create_application(company=f"Co{i}", role_title="Java Engineer",
+                              job_url=f"https://x.com/{i}", match_score=88.0,
+                              user_id=user.id)
+
+    assert db.users_due_for_topup() == []
+
+
+def test_it_waits_rather_than_piling_on_work_already_running(db, monkeypatch):
+    """Retrying while the previous run's postings are still being screened
+    would queue the same shortfall twice."""
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+    user = _topup_ready_user(db)
+    db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/1")
+
+    assert db.users_due_for_topup() == []
+
+
+def test_it_waits_out_the_cooldown_before_trying_again(db, monkeypatch):
+    """Nothing changes in the space of a minute; retrying that fast just
+    re-reads the same boards."""
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+    monkeypatch.setattr(settings, "TOPUP_RETRY_MINUTES", 20)
+    user = _topup_ready_user(db, ran_minutes_ago=2)
+
+    assert db.users_due_for_topup() == []
+
+
+def test_a_dry_day_stops_after_its_allowance(db, monkeypatch):
+    """A market with nothing in it must not spin all day."""
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+    monkeypatch.setattr(settings, "TOPUP_MAX_RUNS_PER_DAY", 3)
+    user = _topup_ready_user(db)
+    for _ in range(3):
+        db.enqueue_job(user.id, kind="topup")
+    # Those count as runs, but must not also count as work in flight.
+    for job in db.list_jobs(user_id=user.id, limit=10):
+        db.finish_job(job.id, __import__("database.models", fromlist=["JobStatus"]).JobStatus.DONE, "")
+
+    assert db.topup_runs_today(user.id) == 3
+    assert db.users_due_for_topup() == []
+
+
+def test_a_disabled_topup_never_retries(db, monkeypatch):
+    monkeypatch.setattr(settings, "DAILY_APPLICATION_CAP", 20)
+    user = _topup_ready_user(db)
+    db.update_user(user.id, topup_enabled=False)
+
+    assert db.users_due_for_topup() == []
+
+
+# ---------------- the screened list has to grow by itself ----------------
+#
+# The pipeline could only ever read a hand-written list of companies. When that
+# list ran dry - 53 boards read, 0 eligible postings, 19/20 ready - the day
+# stopped short, and the only way the list ever grew was someone editing
+# settings.py. Discovery already finds employers by web search and resolves
+# their boards; nothing kept the result.
+
+
+def test_a_discovered_board_is_remembered(db, user):
+    db.learn_board("Braze", "greenhouse", "braze", user_id=user.id)
+    assert "Braze" in db.learned_boards(user.id)
+
+
+def test_learning_the_same_board_twice_does_not_duplicate_it(db, user):
+    """Discovery turns up the same employers run after run."""
+    db.learn_board("Braze", "greenhouse", "braze", user_id=user.id)
+    db.learn_board("braze", "greenhouse", "braze", user_id=user.id)
+    assert db.learned_boards(user.id).count("Braze") == 1
+    assert len(db.learned_boards(user.id)) == 1
+
+
+def test_a_later_sighting_refreshes_the_slug(db, user):
+    """A board that moved provider should not stay wrong forever."""
+    db.learn_board("Braze", "greenhouse", "braze-old", user_id=user.id)
+    db.learn_board("Braze", "ashby", "braze", user_id=user.id)
+
+    from database.models import KnownBoard
+
+    with db.session() as sess:
+        row = sess.query(KnownBoard).filter_by(company="Braze").one()
+        assert (row.provider, row.slug) == ("ashby", "braze")
+
+
+def test_one_users_boards_are_not_offered_to_another(db, user):
+    db.learn_board("Braze", "greenhouse", "braze", user_id=user.id)
+    other = db.create_user("eve2@example.com", "$argon2id$fake")
+    assert db.learned_boards(other.id) == []
+
+
+def test_a_nameless_board_is_ignored(db, user):
+    db.learn_board("   ", "greenhouse", "x", user_id=user.id)
+    assert db.learned_boards(user.id) == []
+
+
+def test_a_productive_board_records_what_it_yielded(db, user):
+    """Which learned boards actually work is worth knowing."""
+    from database.models import KnownBoard
+
+    db.learn_board("Braze", "greenhouse", "braze", user_id=user.id)
+    db.record_board_yield("Braze", 6, user_id=user.id)
+
+    with db.session() as sess:
+        row = sess.query(KnownBoard).filter_by(company="Braze").one()
+        assert row.eligible_seen == 6
+        assert row.last_yield_at is not None
+
+
+def test_recording_a_yield_for_an_unknown_board_is_harmless(db, user):
+    db.record_board_yield("NeverSeen", 3, user_id=user.id)
+    assert db.learned_boards(user.id) == []
+
+
+def test_a_zero_yield_is_not_recorded_as_a_hit(db, user):
+    from database.models import KnownBoard
+
+    db.learn_board("Quiet", "greenhouse", "quiet", user_id=user.id)
+    db.record_board_yield("Quiet", 0, user_id=user.id)
+
+    with db.session() as sess:
+        assert sess.query(KnownBoard).filter_by(company="Quiet").one().eligible_seen == 0
+
+
+def test_a_running_topup_does_not_block_its_own_decision(db, user):
+    """The first version of this asked "is anything running?" from inside a
+    running top-up, so the answer was always yes and the search never widened -
+    the retry fired, found nothing, and stopped."""
+    job = db.enqueue_job(user.id, kind="topup")
+    from database.models import JobStatus
+
+    db.start_job(job.id) if hasattr(db, "start_job") else None
+
+    assert db.has_screening_in_flight(user.id) is True
+    assert db.has_screening_in_flight(user.id, exclude_job_id=job.id) is False
+
+
+def test_other_work_still_blocks_widening(db, user):
+    """Excluding your own job must not blind you to everything else."""
+    mine = db.enqueue_job(user.id, kind="topup")
+    db.enqueue_job(user.id, kind="tailor", job_url="https://x.com/1")
+
+    assert db.has_screening_in_flight(user.id, exclude_job_id=mine.id) is True

@@ -14,7 +14,8 @@
     <div class="nav">
       <a href="/" class="{{ 'active' if path == '/' }}">Overview</a>
       <a href="/discover" class="{{ 'active' if path.startswith('/discover') }}">Find roles</a>
-      <a href="/applications" class="{{ 'active' if path.startswith('/applications') }}">Applications</a>
+      <a href="/applications" class="{{ 'active' if path == '/applications' or path.startswith('/applications/') and not path.startswith('/applications/not-eligible') }}">Applications</a>
+      <a href="/applications/not-eligible" class="{{ 'active' if path.startswith('/applications/not-eligible') }}">Not eligible</a>
       <a href="/queue" class="{{ 'active' if path.startswith('/queue') }}">
         Queue {% if queue.active %}<span class="badge">{{ queue.active }}</span>{% endif %}
       </a>
@@ -48,6 +49,29 @@
     {% if queue.Blocked %}
     <div class="flash flash-err">
       {{ queue.Blocked }} run(s) need you. <a href="/actions">Clear them →</a>
+    </div>
+    {% endif %}
+    {% if user %}
+    <div class="flash {{ 'flash-ok' if user.topup_enabled else 'flash-mute' }} search-switch">
+      {% if user.topup_enabled %}
+        <strong>Job search is on.</strong> Looking for roles daily until
+        {{ daily_target or 20 }} are ready. Spent ${{ '%.2f'|format(spend_today) }} today.
+        <form method="post" action="/search/toggle" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="on" value="0">
+          <input type="hidden" name="back" value="{{ path }}">
+          <button type="submit" class="btn btn-ghost btn-sm">Turn off</button>
+        </form>
+      {% else %}
+        <strong>Job search is off.</strong> Nothing is being searched or screened,
+        so it is costing nothing. Turn it on when you are ready to apply.
+        <form method="post" action="/search/toggle" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="on" value="1">
+          <input type="hidden" name="back" value="{{ path }}">
+          <button type="submit" class="btn btn-sm">Turn on</button>
+        </form>
+      {% endif %}
     </div>
     {% endif %}
     {% if ok %}<div class="flash flash-ok">{{ ok }}</div>{% endif %}

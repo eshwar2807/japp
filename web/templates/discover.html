@@ -69,10 +69,13 @@
       <textarea id="industries" name="industries"
         placeholder="fintech&#10;developer tools">{{ criteria.industries|join('\n') }}</textarea></div>
 
-    <div class="field"><label for="exclude_companies">Never show me (one per line)</label>
+    <div class="field"><label for="exclude_companies">Blocklist — never apply here (one per line)</label>
       <textarea id="exclude_companies" name="exclude_companies"
-        placeholder="Companies you don't want to see">{{ criteria.exclude_companies|join('\n') }}</textarea>
-      <p class="hint">Companies you have already applied to are excluded automatically.</p></div>
+        placeholder="Deloitte&#10;Palantir">{{ criteria.exclude_companies|join('\n') }}</textarea>
+      <p class="hint">Enforced everywhere: these employers are skipped during
+        discovery, skipped by the daily screen, and refused even if you paste one
+        of their job URLs in by hand. Matched on whole words and on the board
+        name, so "Palantir" also catches job-boards.greenhouse.io/palantir.</p></div>
 
     <div class="field-row">
       <div class="field"><label for="max_companies">Companies to search</label>

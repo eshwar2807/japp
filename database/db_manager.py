@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 import logging
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import create_engine, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from config import settings
@@ -40,6 +40,7 @@ from database.models import (
     Credential,
     Feedback,
     JobStatus,
+    KnownBoard,
     LLMUsage,
     LogLevel,
     Notification,
@@ -304,7 +305,15 @@ class DBManager:
         user_id: int | None = None,
         ready_only: bool = False,
         threshold: float | None = None,
+        eligibility: str = "all",
     ) -> Sequence[Application]:
+        """List applications, optionally split by whether they cleared the bar.
+
+        `eligibility` is "passing" (every hard check met and at or above the
+        match threshold), "failing" (anything else), or "all". The two are
+        exact complements, so a posting cannot fall between them and vanish
+        from both tabs.
+        """
         with self.session() as sess:
             stmt = (
                 select(Application)
@@ -316,21 +325,160 @@ class DBManager:
                 stmt = stmt.where(Application.status == status)
             if user_id is not None:
                 stmt = stmt.where(Application.user_id == user_id)
-            if ready_only:
+            if ready_only or eligibility in ("passing", "failing"):
                 from config import settings as _settings
 
                 bar = threshold if threshold is not None else _settings.ELIGIBLE_MATCH_THRESHOLD
                 # order_by appends rather than replaces, so the creation-date
                 # ordering set above has to be cleared or it wins.
-                stmt = (
-                    stmt.where(
+                if eligibility == "failing":
+                    stmt = stmt.where(
+                        or_(
+                            Application.eligible.is_(False),
+                            Application.match_score < bar,
+                        )
+                    )
+                else:
+                    stmt = stmt.where(
                         Application.eligible.is_(True),
                         Application.match_score >= bar,
                     )
-                    .order_by(None)
-                    .order_by(Application.match_score.desc())
-                )
+                # order_by appends rather than replaces, so the creation-date
+                # ordering set above has to be cleared or it wins.
+                stmt = stmt.order_by(None).order_by(Application.match_score.desc())
             return sess.scalars(stmt).all()
+
+    def blocked_companies(self, user_id: int | None = None) -> list[str]:
+        """Employers the user has said they will not apply to.
+
+        Stored in the discovery criteria's "Never show me" list, which until
+        now was only ever pasted into the model's prompt as a request. Reading
+        it here makes it something the pipeline enforces rather than asks for.
+        """
+        criteria = self.get_discovery_criteria(user_id) or {}
+        return [c for c in (criteria.get("exclude_companies") or []) if str(c).strip()]
+
+    def block_company(self, company: str, user_id: int | None = None) -> list[str]:
+        """Add an employer to the blocklist. Idempotent."""
+        from engine.boards import normalize_company
+
+        name = (company or "").strip()
+        if not name:
+            return self.blocked_companies(user_id)
+        criteria = dict(self.get_discovery_criteria(user_id) or {})
+        current = list(criteria.get("exclude_companies") or [])
+        if not any(normalize_company(c) == normalize_company(name) for c in current):
+            current.append(name)
+        criteria["exclude_companies"] = current
+        self.save_discovery_criteria(user_id, criteria)
+        return current
+
+    def unblock_company(self, company: str, user_id: int | None = None) -> list[str]:
+        from engine.boards import normalize_company
+
+        criteria = dict(self.get_discovery_criteria(user_id) or {})
+        target = normalize_company(company)
+        current = [c for c in (criteria.get("exclude_companies") or [])
+                   if normalize_company(c) != target]
+        criteria["exclude_companies"] = current
+        self.save_discovery_criteria(user_id, criteria)
+        return current
+
+    def learn_board(self, company: str, provider: str = "", slug: str = "",
+                    user_id: int | None = None) -> None:
+        """Remember a board discovery found, so later screens can use it.
+
+        Idempotent on (user, company): discovery turns up the same employers
+        repeatedly, and each sighting should refresh the slug rather than add a
+        duplicate row.
+        """
+        name = (company or "").strip()
+        if not name:
+            return
+        with self.session() as sess:
+            stmt = select(KnownBoard).where(
+                func.lower(KnownBoard.company) == name.lower())
+            if user_id is not None:
+                stmt = stmt.where(KnownBoard.user_id == user_id)
+            existing = sess.scalars(stmt).first()
+            if existing:
+                if provider:
+                    existing.provider = provider
+                if slug:
+                    existing.slug = slug
+                return
+            sess.add(KnownBoard(user_id=user_id, company=name,
+                                provider=provider, slug=slug))
+
+    def learned_boards(self, user_id: int | None = None) -> list[str]:
+        """Company names discovery has found boards for, newest first."""
+        with self.session() as sess:
+            stmt = select(KnownBoard.company).order_by(KnownBoard.created_at.desc())
+            if user_id is not None:
+                stmt = stmt.where(KnownBoard.user_id == user_id)
+            return [row[0] for row in sess.execute(stmt)]
+
+    def record_board_yield(self, company: str, eligible: int,
+                           user_id: int | None = None) -> None:
+        """Note that a board produced eligible roles, and when."""
+        name = (company or "").strip()
+        if not name or eligible <= 0:
+            return
+        with self.session() as sess:
+            stmt = select(KnownBoard).where(
+                func.lower(KnownBoard.company) == name.lower())
+            if user_id is not None:
+                stmt = stmt.where(KnownBoard.user_id == user_id)
+            board = sess.scalars(stmt).first()
+            if board is None:
+                return
+            board.eligible_seen = (board.eligible_seen or 0) + eligible
+            board.last_yield_at = datetime.now(timezone.utc)
+
+    def resume_for_company(self, company: str, user_id: int | None = None):
+        """The resume already sent to this employer, if there is one.
+
+        A second role at a company you have applied to should go out on the
+        same resume, not a freshly tailored variant: an ATS keys candidates by
+        email and shows a recruiter every application together, so two
+        differently-emphasised resumes are two versions of one person. Reusing
+        the stored one also means the posting is scored against the resume that
+        will actually be sent.
+
+        Returns the most recent application at that employer carrying a
+        tailored resume, or None.
+        """
+        key = (company or "").strip().lower()
+        if not key:
+            return None
+        with self.session() as sess:
+            stmt = (
+                select(Application)
+                .where(func.lower(func.trim(Application.company)) == key)
+                .where(Application.tailored_payload.is_not(None))
+                .order_by(Application.created_at.desc())
+            )
+            if user_id is not None:
+                stmt = stmt.where(Application.user_id == user_id)
+            return sess.scalars(stmt).first()
+
+    def applications_per_company(self, user_id: int | None = None) -> dict[str, int]:
+        """How many applications exist for each employer, keyed case-insensitively.
+
+        Used to stop a second differently-tailored resume reaching the same
+        recruiter. Counts every application regardless of status: a draft that
+        is queued to run is just as much a second resume as a sent one.
+        """
+        counts: dict[str, int] = {}
+        with self.session() as sess:
+            stmt = select(Application.company)
+            if user_id is not None:
+                stmt = stmt.where(Application.user_id == user_id)
+            for (company,) in sess.execute(stmt):
+                key = (company or "").strip().lower()
+                if key:
+                    counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def update_application(self, app_id: int, user_id: int | None = None, **fields) -> Application:
         with self.session() as sess:
@@ -815,6 +963,7 @@ class DBManager:
         kind: str = "tailor",
         job_url: str = "",
         job_description: str | None = None,
+        job_location: str | None = None,
         application_id: int | None = None,
         batch_id: str | None = None,
     ) -> RunJob:
@@ -832,6 +981,7 @@ class DBManager:
                 kind=kind,
                 job_url=job_url,
                 job_description=job_description,
+                job_location=job_location,
                 application_id=application_id,
                 batch_id=batch_id,
                 position=position + 1,
@@ -955,6 +1105,22 @@ class DBManager:
                 job.message = ""
             sess.flush()
             return job
+
+    def retry_job(self, job_id: int, message: str = "") -> int:
+        """Put a job back in the queue and count the attempt.
+
+        Returns the new attempt count. Used for failures that say nothing about
+        the job itself - an upstream overload, a network blip - which the old
+        behaviour turned into permanent failures.
+        """
+        with self.session() as sess:
+            job = sess.get(RunJob, job_id)
+            job.attempts = (job.attempts or 0) + 1
+            job.status = JobStatus.QUEUED
+            job.message = message[:500]
+            job.started_at = None
+            sess.commit()
+            return job.attempts
 
     def finish_job(
         self, job_id: int, status: JobStatus, message: str = "",
@@ -1464,14 +1630,83 @@ class DBManager:
             if not user.topup_enabled or not user.is_active:
                 continue
             local_now = to_zone(now, user.timezone)
-            if local_now is None or local_now.hour < int(user.topup_hour or 3):
+            # `or 3` would be wrong: midnight is 0, which is falsy, so a user
+            # who asked for a 00:00 top-up would silently get one at 03:00.
+            hour = 3 if user.topup_hour is None else int(user.topup_hour)
+            if local_now is None or local_now.hour < hour:
                 continue
+
+            ran_today = False
             if user.last_topup_at is not None:
                 last_local = to_zone(user.last_topup_at, user.timezone)
-                if last_local and last_local.date() == local_now.date():
-                    continue
-            due.append(user.id)
+                ran_today = bool(last_local and last_local.date() == local_now.date())
+
+            if not ran_today:
+                due.append(user.id)
+                continue
+
+            # Already run today, and short of the target. One attempt per day
+            # meant a shortfall sat there until the next morning unless someone
+            # noticed and asked, so keep going instead.
+            if self._should_retry_topup(user, now):
+                due.append(user.id)
         return due
+
+    def _should_retry_topup(self, user, now: datetime) -> bool:
+        """Whether a user who has already had a top-up today needs another.
+
+        Four things have to hold, and each rules out a way of wasting work:
+        the day's target is not met; nothing is still being screened (or the
+        retry would pile on top of work already under way); enough time has
+        passed since the last run for anything to have changed; and the day has
+        not already spent its allowance of runs on a market with nothing in it.
+        """
+        if self.eligible_today(user.id) >= settings.DAILY_APPLICATION_CAP:
+            return False
+        if self.has_screening_in_flight(user.id):
+            return False
+        if self.topup_runs_today(user.id) >= settings.TOPUP_MAX_RUNS_PER_DAY:
+            return False
+        if user.last_topup_at is None:
+            return True
+        last = user.last_topup_at
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        waited = (now - last).total_seconds() / 60.0
+        return waited >= settings.TOPUP_RETRY_MINUTES
+
+    def has_screening_in_flight(self, user_id: int,
+                                exclude_job_id: int | None = None) -> bool:
+        """Whether any top-up or tailoring work is still outstanding.
+
+        `exclude_job_id` leaves out the caller's own job. A top-up asking this
+        question is itself running, so without that it always sees work in
+        flight and can never decide to widen the search - which is exactly what
+        happened: the retry fired, found nothing, and stopped without ever
+        looking for new boards.
+        """
+        with self.session() as sess:
+            stmt = select(func.count(RunJob.id)).where(
+                RunJob.user_id == user_id,
+                RunJob.kind.in_(("topup", "discover", "tailor")),
+                RunJob.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+            )
+            if exclude_job_id is not None:
+                stmt = stmt.where(RunJob.id != exclude_job_id)
+            return sess.scalar(stmt) > 0
+
+    def topup_runs_today(self, user_id: int) -> int:
+        """Top-up jobs created today, so a dry day cannot spin forever."""
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        with self.session() as sess:
+            return int(sess.scalar(
+                select(func.count(RunJob.id)).where(
+                    RunJob.user_id == user_id,
+                    RunJob.kind == "topup",
+                    RunJob.created_at >= start,
+                )
+            ) or 0)
 
     def mark_topup_run(self, user_id: int) -> None:
         with self.session() as sess:

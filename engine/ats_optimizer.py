@@ -577,11 +577,10 @@ class ATSOptimizer:
     def client(self) -> LLMClientProtocol:
         """Lazily build the Anthropic client so importing this module needs no key."""
         if self._client is None:
-            import anthropic
+            from engine.llm import make_client
 
             key = self.api_key or settings.ANTHROPIC_API_KEY
-            kwargs = {"api_key": key} if key else {}
-            self._client = anthropic.Anthropic(**kwargs).messages
+            self._client = make_client(key).messages
         return self._client
 
     def _call(self, system: str, prompt: str, output_format: type, phase: str = "") -> Any:

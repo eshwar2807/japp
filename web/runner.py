@@ -80,6 +80,126 @@ def fetch_job_description(url: str) -> str:
     return "\n".join(line.rstrip() for line in (text or "").splitlines() if line.strip())
 
 
+def _drop_blocked(db, user_id: int, postings: list) -> list:
+    """Remove postings at employers the user refuses to apply to."""
+    from engine.boards import is_blocked
+
+    blocked = db.blocked_companies(user_id)
+    if not blocked:
+        return postings
+    kept, dropped = [], []
+    for posting in postings:
+        hit = is_blocked(posting.company, posting.url, blocked)
+        (dropped if hit else kept).append(posting)
+    if dropped:
+        db.log_event(
+            user_id, "blocked_company",
+            f"Skipped {len(dropped)} posting(s) at blocked employers: "
+            + ", ".join(sorted({p.company for p in dropped})[:8]),
+        )
+    return kept
+
+
+def _company_has_room(counts: dict[str, int], company: str) -> bool:
+    """Whether another application at this employer is within the cap.
+
+    Mutates `counts` so a single run cannot queue four roles at one company by
+    checking each against the same starting number - which is exactly what
+    happened: four Databricks postings, two Stripe and two Tebra all reached
+    the queue, each destined for its own separately tailored resume.
+    """
+    key = (company or "").strip().lower()
+    if not key or settings.MAX_APPLICATIONS_PER_COMPANY <= 0:
+        return True
+    if counts.get(key, 0) >= settings.MAX_APPLICATIONS_PER_COMPANY:
+        return False
+    counts[key] = counts.get(key, 0) + 1
+    return True
+
+
+def _within_company_cap(db, user_id: int, postings: list) -> list:
+    """Drop postings that would put a second resume in front of one recruiter."""
+    counts = db.applications_per_company(user_id)
+    kept, dropped = [], []
+    for posting in postings:
+        (kept if _company_has_room(counts, posting.company) else dropped).append(posting)
+    if dropped:
+        db.log_event(
+            user_id, "company_cap",
+            f"Skipped {len(dropped)} posting(s) at employers already applied to "
+            f"(cap {settings.MAX_APPLICATIONS_PER_COMPANY} per company): "
+            + ", ".join(sorted({p.company for p in dropped})[:8]),
+        )
+    return kept
+
+
+def _reuse_company_resume(db, user_id: int, job, jd_text: str, api_key: str,
+                          model: str, application_ref: list) -> str | None:
+    """Score a repeat employer's posting against the resume already sent them.
+
+    Returns a status message when this posting was handled by reuse, or None to
+    fall through to ordinary tailoring. Only the keyword-extraction call is
+    spent here - the expensive tailoring passes are skipped entirely, because
+    the resume is already decided.
+    """
+    from engine.ats_optimizer import ATSOptimizer, score_match
+    from engine.schemas import TailoredResumeSchema
+
+    prior = db.resume_for_company(_company_of(job), user_id=user_id)
+    if prior is None:
+        return None
+
+    optimizer = ATSOptimizer(
+        profile=load_profile(db, user_id), model=model, api_key=api_key,
+        on_usage=usage_recorder(db, user_id, application_ref, model),
+    )
+    keywords = optimizer.extract_keywords(jd_text)
+    resume = TailoredResumeSchema.model_validate(json.loads(prior.tailored_payload))
+    score, detail = score_match(keywords, resume)
+
+    bar = settings.ELIGIBLE_MATCH_THRESHOLD
+    if score < bar:
+        db.log_event(
+            user_id, "reuse_below_bar",
+            f"The resume already sent to {prior.company} scores {score:.1f}% on "
+            f"{keywords.role_title} (bar {bar:.0f}%). Not applying rather than "
+            "sending that employer a second, different resume.",
+        )
+        return (f"Skipped: the resume used at {prior.company} scores "
+                f"{score:.1f}% here (bar {bar:.0f}%)")
+
+    application = db.create_application(
+        company=prior.company,
+        role_title=keywords.role_title,
+        job_url=job.job_url,
+        job_description=jd_text,
+        match_score=score,
+        tailored_payload=json.loads(prior.tailored_payload),
+        resume_pdf_path=prior.resume_pdf_path,
+        user_id=user_id,
+        salary_min=getattr(prior, "salary_min", None),
+        salary_max=getattr(prior, "salary_max", None),
+    )
+    application_ref[0] = application.id
+    db.log_event(
+        user_id, "resume_reused",
+        f"Reusing the resume already sent to {prior.company} (application "
+        f"#{prior.id}); it scores {score:.1f}% on {keywords.role_title}.",
+        application_id=application.id,
+    )
+    db.enqueue_job(user_id, kind="apply", job_url=job.job_url,
+                   application_id=application.id)
+    return f"Reused the {prior.company} resume - {score:.1f}% match, queued to apply"
+
+
+def _company_of(job) -> str:
+    """Best guess at the employer for a queued posting, before tailoring names it."""
+    from engine.boards import detect_board
+
+    detected = detect_board(job.job_url or "")
+    return detected[1] if detected else ""
+
+
 # --------------------------------------------------------------------------
 # Tailor
 # --------------------------------------------------------------------------
@@ -92,6 +212,21 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     job = db.get_job(job_id)
     if job is None:
         raise RuntimeError(f"No job #{job_id}.")
+
+    # Checked before anything is loaded or fetched. A posting queued by hand
+    # never passed the discovery filters, and "I am not comfortable applying
+    # here" has to hold however the URL arrived - without paying for a profile
+    # load and a browser fetch of a description nobody will use.
+    from engine.boards import is_blocked
+
+    blocked_hit = is_blocked(_company_of(job), job.job_url,
+                             db.blocked_companies(user_id))
+    if blocked_hit:
+        db.log_event(user_id, "blocked_company",
+                     f"{job.job_url} is at a blocked employer ({blocked_hit}).")
+        db.finish_job(job_id, JobStatus.DONE,
+                      f"Skipped: {blocked_hit} is on your blocklist")
+        return
 
     profile = load_profile(db, user_id)
     api_key = db.get_anthropic_key(user_id)
@@ -122,6 +257,23 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         db.log_event(user_id, "fetch_jd", "Fetching the posting")
         jd_text = fetch_job_description(job.job_url)
 
+    # Location, re-checked here and not only at discovery. A row queued under
+    # an older, looser filter is still in the queue after the filter is fixed,
+    # and a Vietnam-only posting reached the browser that way. Costs nothing.
+    from engine.boards import location_allowed, location_for_url
+
+    wanted_locations = (db.get_discovery_criteria(user_id) or {}).get("locations") or []
+    # Rows queued before the location was recorded have none, and skipping the
+    # check for them is exactly how the Vietnam posting would still get through.
+    where = job.job_location or location_for_url(job.job_url)
+    if where and not location_allowed(where, wanted_locations):
+        db.log_event(user_id, "ineligible",
+                     f"{job.job_url}: {where} is outside "
+                     + ", ".join(wanted_locations))
+        db.finish_job(job_id, JobStatus.DONE,
+                      f"Skipped: {where} is not a requested location")
+        return
+
     # Hard constraints, checked before anything is spent. These are not
     # preferences: a clearance an H-1B holder cannot obtain, or an employer who
     # states they will not sponsor, closes the role however well it fits.
@@ -144,7 +296,17 @@ def run_tailor_job(db, job_id: int, user_id: int, gatekeeper) -> None:
                       "Skipped: " + "; ".join(verdict.reasons))
         return
 
+    # A company already applied to keeps the resume it was sent. Tailoring a
+    # fresh variant would put a second version of the same person in front of
+    # one recruiter, and would also score the posting against a resume built
+    # for it rather than the one that will actually go out.
     application_ref: list[int | None] = [job.application_id]
+    reused = _reuse_company_resume(db, user_id, job, jd_text, api_key, model,
+                                   application_ref)
+    if reused is not None:
+        db.finish_job(job_id, JobStatus.DONE, reused, application_id=application_ref[0])
+        return
+
     optimizer = ATSOptimizer(
         profile=profile, model=model, api_key=api_key,
         on_usage=usage_recorder(db, user_id, application_ref, model),
@@ -307,15 +469,46 @@ def run_apply_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         salary_max=application.salary_max,
     )
 
-    driver_class = get_driver_class(application.job_url)
+    # A stored link is often the employer's careers page, which carries no form
+    # at all - that is what produced "no resume input" and "submit button not
+    # found" on Stripe. Find the page that really holds the form before opening
+    # a browser, and if there is none, say so instead of asking the user to
+    # explain a missing submit button.
+    from engine.boards import BoardError, find_application_form
+
+    try:
+        target = find_application_form(application.job_url)
+    except BoardError as exc:
+        # Could not tell. Carry on with the stored link rather than writing off
+        # a real application because a board was slow.
+        db.log_event(user_id, "form_lookup_failed", str(exc),
+                     level=LogLevel.WARNING, application_id=application.id)
+        target = application.job_url
+    if target is None:
+        db.log_event(
+            user_id, "no_application_form",
+            f"{application.job_url} serves no application form on any known ATS "
+            "address; this employer takes applications only through their own "
+            "site. Apply to this one by hand.",
+            level=LogLevel.WARNING, application_id=application.id,
+        )
+        db.finish_job(job_id, JobStatus.DONE,
+                      "Skipped: no reachable application form - apply by hand")
+        return
+
+    driver_class = get_driver_class(target)
+    if target != application.job_url:
+        db.log_event(user_id, "apply_url_repaired",
+                     f"{application.job_url} carries no form; using {target}",
+                     application_id=application.id)
     db.log_event(user_id, "apply_start",
-                 f"Opening {application.job_url} with the {driver_class.NAME} driver",
+                 f"Opening {target} with the {driver_class.NAME} driver",
                  application_id=application.id)
 
     try:
         with HumanBrowser(gatekeeper=gatekeeper) as browser:
             driver = driver_class(browser, profile, mapper, db)
-            outcome = driver.apply(application.job_url, pdf_path)
+            outcome = driver.apply(target, pdf_path)
             outcome.screenshot_path = str(
                 browser.screenshot(settings.OUTPUT_DIR / "screenshots" / f"app_{application.id}.png")
             )
@@ -397,7 +590,31 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
         profile=load_profile(db, user_id),
         min_estimated_fit=settings.DISCOVERY_MIN_FIT,
     )
-    postings = [p for p in result["postings"] if p.url not in seen_urls]
+    # Both forms are checked: rows queued before apply_url existed hold the
+    # employer's own link, and re-queueing all of them would be a fresh start.
+    # Remember every board that answered. A company found by web search is
+    # useful once; its board is useful every day after, and this is what lets
+    # the screened list grow instead of staying whatever was hand-written.
+    from engine.boards import is_blocked as _is_blocked
+
+    blocked_names = db.blocked_companies(user_id)
+    learned = 0
+    for name, provider, slug in result.get("resolved_boards") or []:
+        if _is_blocked(name, "", blocked_names):
+            continue
+        before = set(db.learned_boards(user_id))
+        db.learn_board(name, provider, slug, user_id=user_id)
+        if name not in before:
+            learned += 1
+    if learned:
+        db.log_event(user_id, "boards_learned",
+                     f"Added {learned} new job board(s) to the daily screen; "
+                     f"{len(db.learned_boards(user_id))} learned in total.")
+
+    postings = [p for p in result["postings"]
+                if p.url not in seen_urls and p.apply_url not in seen_urls]
+    postings = _drop_blocked(db, user_id, postings)
+    postings = _within_company_cap(db, user_id, postings)
 
     # Screening budget, not application budget. Most of these will be rejected
     # by the viability check for one cheap call each, and twenty matches means
@@ -413,9 +630,10 @@ def run_discovery_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     batch_id = f"disc{job_id}"
     for posting in postings:
         db.enqueue_job(
-            user_id, kind="tailor", job_url=posting.url,
+            user_id, kind="tailor", job_url=posting.apply_url,
             # The board already gave us the description, so no page fetch later.
             job_description=posting.description or None,
+            job_location=posting.location or None,
             batch_id=batch_id,
         )
 
@@ -464,21 +682,40 @@ def run_topup_job(db, job_id: int, user_id: int, gatekeeper) -> None:
                       f"{ready} already ready; nothing to top up.")
         return
 
+    # The hand-written list plus everything discovery has learned since.
+    companies = list(settings.TOPUP_COMPANIES)
+    seen_names = {c.strip().lower() for c in companies}
+    for name in db.learned_boards(user_id):
+        if name.strip().lower() not in seen_names:
+            companies.append(name)
+            seen_names.add(name.strip().lower())
+
     db.log_event(user_id, "topup_start",
-                 f"{ready}/{target} ready; screening {len(settings.TOPUP_COMPANIES)} boards")
+                 f"{ready}/{target} ready; screening {len(companies)} boards "
+                 f"({len(companies) - len(settings.TOPUP_COMPANIES)} learned)")
 
     seen = {a.job_url for a in db.list_applications(limit=1000, user_id=user_id)}
     seen |= {j.job_url for j in db.list_jobs(user_id=user_id, limit=1000)}
+    per_company = db.applications_per_company(user_id)
+    capped: list[str] = []
 
     candidates: list[tuple[float, Any]] = []
     reachable = 0
-    for company in settings.TOPUP_COMPANIES:
+    from engine.boards import is_blocked
+
+    blocked = db.blocked_companies(user_id)
+    for company in companies:
+        if is_blocked(company, "", blocked):
+            continue
         resolved = resolve_board(company, "")
         if not resolved:
             continue
         reachable += 1
         for posting in resolved[2]:
-            if posting.url in seen:
+            if not _company_has_room(per_company, posting.company):
+                capped.append(posting.company)
+                continue
+            if posting.url in seen or posting.apply_url in seen:
                 continue
             if not matches(posting,
                            ["java", "software engineer", "backend", "developer"],
@@ -503,11 +740,56 @@ def run_topup_job(db, job_id: int, user_id: int, gatekeeper) -> None:
     room = max(settings.DAILY_SCREEN_CAP - db.screened_today(user_id), 0)
     queued = 0
     for _, posting in candidates[:room]:
-        db.enqueue_job(user_id, kind="tailor", job_url=posting.url,
+        db.enqueue_job(user_id, kind="tailor", job_url=posting.apply_url,
+                       job_location=posting.location or None,
                        job_description=posting.description or None, batch_id="topup")
         queued += 1
 
+    # "0 eligible postings found" said nothing about why, and the why was that
+    # every candidate had already been applied to or was at a capped employer.
+    # A run that finds nothing has to say what it discarded.
     message = (f"{reachable} boards read, {len(candidates)} eligible postings found, "
                f"{queued} queued for screening")
+    if capped:
+        from collections import Counter
+
+        top = ", ".join(f"{name} x{n}" for name, n in Counter(capped).most_common(5))
+        message += f"; {len(capped)} skipped at capped employers ({top})"
     db.log_event(user_id, "topup_done", message)
+
+    # The boards we know are exhausted and the day is still short. Rather than
+    # stopping there - which is what left 19/20 sitting until someone asked -
+    # go and find boards we do not know yet. Discovery searches the web for
+    # companies hiring, and every board it resolves is remembered for tomorrow.
+    if queued == 0 and db.eligible_today(user_id) < target:
+        _widen_the_search(db, user_id, target, this_job=job_id)
+
     db.finish_job(job_id, JobStatus.DONE, message)
+
+
+def _widen_the_search(db, user_id: int, target: int,
+                      this_job: int | None = None) -> None:
+    """Queue a discovery run to find employers we have never screened.
+
+    Bounded by the same daily allowance as the top-up itself: a market with
+    nothing in it must not be searched all day.
+    """
+    import json as _json
+
+    if db.has_screening_in_flight(user_id, exclude_job_id=this_job):
+        return
+    runs = db.topup_runs_today(user_id)
+    if runs >= settings.TOPUP_MAX_RUNS_PER_DAY:
+        return
+
+    criteria = dict(db.get_discovery_criteria(user_id) or {})
+    criteria["max_companies"] = criteria.get("max_companies") or 20
+    job = db.enqueue_job(user_id, kind="discover",
+                         job_description=_json.dumps(criteria))
+    db.log_event(
+        user_id, "search_widened",
+        f"Known boards are exhausted and the day is short "
+        f"({db.eligible_today(user_id)}/{target}). Searching for employers we "
+        f"have not screened before; queued as job #{job.id}.",
+    )
+

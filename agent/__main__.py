@@ -60,6 +60,7 @@ def run_one(client: DashboardClient, payload: dict) -> None:
     """Run a single claimed apply job against a local browser."""
     from automation.ats_drivers import get_driver_class
     from automation.stealth_browser import (
+        BrowserUnavailable,
         HumanBrowser,
         HumanDeclined,
         ManualInterventionRequired,
@@ -94,17 +95,60 @@ def run_one(client: DashboardClient, payload: dict) -> None:
         salary_max=application.get("salary_max"),
     )
 
+    # The stored link is often the employer's careers listing, which has no
+    # form on it - that is what produced "no resume input" and "submit button
+    # not found". Settle on the page that really holds the form before starting
+    # a browser, and if no such page exists, hand this one back rather than
+    # asking about a submit button that was never going to be there.
+    from engine.boards import BoardError, find_application_form
+
+    try:
+        target = find_application_form(application["job_url"])
+    except BoardError as exc:
+        # Could not tell. Carry on with the stored link rather than writing off
+        # a real application because a board was slow.
+        client.log(job_id, "form_lookup_failed", str(exc), level="WARNING")
+        target = application["job_url"]
+    if target is None:
+        message = ("No application form at this URL on any known ATS address; "
+                   "this employer only accepts applications through their own "
+                   "site. Apply to this one by hand.")
+        client.log(job_id, "no_application_form", message, level="WARNING")
+        client.finish(job_id, submitted=False, message=message)
+        print(f"  Skipped: no reachable form — apply by hand at {application['job_url']}")
+        return
+    if target != application["job_url"]:
+        print(f"  Form is at: {target}")
+
     with tempfile.TemporaryDirectory(prefix="jp_agent_") as tmp:
         resume = client.download_resume(payload["resume_url"], Path(tmp) / "resume.pdf")
-        client.log(job_id, "started", f"Agent picked up {application['job_url']}")
+        client.log(job_id, "started", f"Agent picked up {target}")
 
         gatekeeper = AgentGatekeeper(client, job_id)
-        driver_class = get_driver_class(application["job_url"])
+        driver_class = get_driver_class(target)
 
         try:
             with HumanBrowser(gatekeeper=gatekeeper) as browser:
                 driver = driver_class(browser, profile, mapper, db=None)
-                outcome = driver.apply(application["job_url"], resume)
+                outcome = driver.apply(target, resume)
+                # Proof of what the page looked like when the run ended. The
+                # server-side path has always kept one; the agent kept nothing,
+                # so a run reporting "Submitted" left no record behind at all.
+                shots = Path.home() / ".japp" / "screenshots"
+                shots.mkdir(parents=True, exist_ok=True)
+                try:
+                    outcome.screenshot_path = str(
+                        browser.screenshot(shots / f"app_{application['id']}.png"))
+                    print(f"  Screenshot: {outcome.screenshot_path}")
+                except Exception as exc:
+                    log.debug("Could not capture a screenshot: %s", exc)
+        except BrowserUnavailable as exc:
+            # Nothing to do with this application: the machine cannot run any
+            # of them. Hand the job back untouched rather than burning through
+            # the whole queue marking each one failed.
+            client.log(job_id, "browser_unavailable", str(exc), level="ERROR")
+            client.release(job_id, str(exc)[:400])
+            raise
         except (ManualInterventionRequired, HumanDeclined) as exc:
             client.log(job_id, "stopped", str(exc), level="WARNING")
             client.finish(job_id, submitted=False, message=str(exc)[:400])
@@ -122,8 +166,16 @@ def run_one(client: DashboardClient, payload: dict) -> None:
         message=outcome.message or ("Submitted" if outcome.submitted else "Not submitted"),
         escalations=[{"question": e.question, "reason": e.reason} for e in outcome.escalations],
     )
-    print(f"  {'Submitted' if outcome.submitted else 'Not submitted'} "
-          f"({outcome.fields_filled} fields filled)")
+    # Say which of the two happened. "Submitted" on the strength of a click
+    # alone was the thing that could not be trusted.
+    if outcome.submitted:
+        print(f"  Submitted — confirmed by: {outcome.confirmation[:70]} "
+              f"({outcome.fields_filled} fields filled)")
+    elif outcome.confirmation == "" and "no confirmation" in (outcome.message or ""):
+        print(f"  UNCONFIRMED — the click landed but the page showed no receipt. "
+              f"Check it yourself ({outcome.fields_filled} fields filled)")
+    else:
+        print(f"  Not submitted ({outcome.fields_filled} fields filled)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -178,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         idle_notice = True
         try:
             run_one(client, payload)
+        except BrowserUnavailable as exc:
+            print(f"\n  Stopping: {exc}")
+            print("  The job was put back in the queue. Start the agent again "
+                  "once that is sorted.")
+            return 1
         except Exception:
             log.exception("Job failed unexpectedly")
         if args.once:

@@ -300,3 +300,79 @@ def test_a_question_naming_both_countries_still_answers_for_the_us(mapper):
     answer = mapper.map_field(f("Are you authorized to work in the US or Canada?"))
     assert answer.source is AnswerSource.RULE
     assert answer.value == "Yes"
+
+
+# ---------------- a rule is not the last word on a choice field ----------------
+#
+# Plaid asks "Preferred Work Location" with the options San Francisco HQ, New
+# York City Office and Seattle Office. A rule matched on "Location", returned
+# the candidate's home city, and the option matcher then rejected it - so the
+# question went to the user as "1 field(s) could not be answered safely",
+# without the model ever being asked. It could have picked from the list.
+
+
+def _office_field():
+    from engine.screener_mapper import FieldSpec, FieldType
+
+    return FieldSpec(
+        label="Preferred Work Location",
+        name="Preferred Work Location",
+        field_type=FieldType.RADIO,
+        options=["San Francisco HQ", "New York City Office", "Seattle Office"],
+        selector='fieldset[data-jp-group="1"] input[type="checkbox"]',
+    )
+
+
+def test_a_rule_answer_that_fits_no_option_does_not_end_the_search(prof_fixture):
+    """The rule fires and is discarded; the tailored answer is used instead."""
+    from engine.screener_mapper import AnswerSource, ScreenerMapper
+
+    mapper = ScreenerMapper(
+        prof_fixture,
+        screener_answers={"Preferred Work Location": "San Francisco HQ"},
+    )
+
+    answer = mapper.map_field(_office_field())
+
+    assert answer.value == "San Francisco HQ"
+    assert answer.source is not AnswerSource.UNMAPPED
+
+
+def test_a_remembered_answer_is_reached_past_a_failing_rule(prof_fixture):
+    from engine.screener_mapper import AnswerSource, ScreenerMapper
+
+    mapper = ScreenerMapper(
+        prof_fixture,
+        remembered={"Preferred Work Location": "Seattle Office"},
+    )
+
+    answer = mapper.map_field(_office_field())
+
+    assert answer.value == "Seattle Office"
+    assert answer.source is AnswerSource.MEMORY
+
+
+def test_it_still_escalates_when_nothing_can_answer_it(prof_fixture):
+    """Falling through must not turn into guessing."""
+    from engine.screener_mapper import ScreenerMapper
+
+    answer = ScreenerMapper(prof_fixture).map_field(_office_field())
+
+    assert answer.needs_human
+
+
+def test_a_rule_answer_that_does_fit_an_option_is_still_used(prof_fixture):
+    """The fall-through must not bypass a rule that was right all along."""
+    from engine.screener_mapper import AnswerSource, FieldSpec, FieldType, ScreenerMapper
+
+    field = FieldSpec(
+        label="Are you legally authorized to work in the United States?",
+        field_type=FieldType.RADIO,
+        options=["Yes", "No"],
+        selector="x",
+    )
+
+    answer = ScreenerMapper(prof_fixture).map_field(field)
+
+    assert answer.value == "Yes"
+    assert answer.source is AnswerSource.RULE

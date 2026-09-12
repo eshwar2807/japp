@@ -113,6 +113,11 @@ button:hover, .btn:hover { filter: brightness(1.08); text-decoration: none; }
 .flash-ok { background: var(--good-soft); color: var(--good); }
 .flash-err { background: var(--bad-soft); color: var(--bad); }
 .flash-warn { background: var(--warn-soft); color: var(--warn); }
+/* The search switch sits on every page, so it is muted when off rather than
+   alarming: "off" is a legitimate resting state, not a problem to fix. */
+.flash-mute { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+.search-switch { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.inline-form { display: inline; margin: 0; }
 
 /* progress */
 .bar { height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden;

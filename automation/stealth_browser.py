@@ -39,6 +39,15 @@ class HumanDeclined(Exception):
     """Raised when the operator answers 'no' at a confirmation gate."""
 
 
+class BrowserUnavailable(Exception):
+    """The browser could not be started, with a reason worth acting on.
+
+    Separate from ManualInterventionRequired because it is not about this
+    application: the machine is not in a state to run any of them, and the
+    message says what to do about it.
+    """
+
+
 # --------------------------------------------------------------------------
 # Timing helpers
 # --------------------------------------------------------------------------
@@ -132,6 +141,9 @@ def alert(title: str, lines: list[str] | None = None) -> None:
 # Browser
 # --------------------------------------------------------------------------
 
+#: Vendors whose widgets we recognise. Kept as selectors for the record; the
+#: live check runs in the page (CAPTCHA_SCAN_JS), because presence in the DOM
+#: is not the question - whether a human is being asked something is.
 CAPTCHA_SIGNATURES = (
     "iframe[src*='recaptcha']",
     "iframe[src*='hcaptcha']",
@@ -140,8 +152,66 @@ CAPTCHA_SIGNATURES = (
     "div.h-captcha",
     "div.cf-turnstile",
     "#px-captcha",
-    "[data-sitekey]",
 )
+
+#: Finds a challenge a human could actually clear, and ignores the widgets that
+#: sit on a page without ever asking the visitor anything.
+#:
+#: Greenhouse embeds invisible reCAPTCHA v3 on every posting. Its badge is on
+#: screen and its anchor iframe is "visible" to Playwright, so matching the
+#: selector alone parked every Greenhouse run on a page whose only control is an
+#: Apply button - and no handoff could clear it, because an invisible widget
+#: never goes away. Three things separate the real thing from the decoration:
+#: the v3 badge sits in a known container, an invisible widget declares itself
+#: so in its own markup, and a challenge nobody is being asked is hidden by its
+#: container until it is.
+CAPTCHA_SCAN_JS = r"""
+() => {
+  const VENDOR = /recaptcha|hcaptcha|turnstile|challenges\.cloudflare|captcha/i;
+  const vw = window.innerWidth, vh = window.innerHeight;
+
+  const hidden = (el) => {
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      if (s.display === 'none' || s.visibility === 'hidden') return true;
+      if (parseFloat(s.opacity || '1') < 0.1) return true;
+    }
+    return false;
+  };
+
+  const onScreen = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width >= 100 && r.height >= 40 &&
+           r.right > 0 && r.bottom > 0 && r.left < vw && r.top < vh;
+  };
+
+  // The v3 corner badge, and any widget that declares itself invisible.
+  const passive = (el) =>
+    !!el.closest('.grecaptcha-badge') ||
+    el.getAttribute('data-size') === 'invisible';
+
+  for (const f of document.querySelectorAll('iframe')) {
+    const src = f.getAttribute('src') || '';
+    const title = f.getAttribute('title') || '';
+    if (!VENDOR.test(src) && !/captcha/i.test(title)) continue;
+    if (passive(f)) continue;
+    // An invisible widget's anchor frame is the badge. Its /bframe is the
+    // challenge popup, which carries the same size flag but is only shown
+    // when the visitor is genuinely being asked.
+    if (/[?&]size=invisible/.test(src) && !/\/bframe/.test(src)) continue;
+    if (hidden(f) || !onScreen(f)) continue;
+    return 'challenge frame: ' + (title || src.split('?')[0]);
+  }
+
+  for (const el of document.querySelectorAll(
+      '.g-recaptcha,.h-captcha,.cf-turnstile,#px-captcha')) {
+    if (passive(el)) continue;
+    if (hidden(el) || !onScreen(el)) continue;
+    return 'challenge widget: ' + (el.className || el.id);
+  }
+  return null;
+}
+"""
 
 CAPTCHA_TEXT = (
     "verify you are human",
@@ -198,11 +268,45 @@ class HumanBrowser:
         if self.proxy:
             launch["proxy"] = {"server": self.proxy}
 
-        self.context = self._playwright.chromium.launch_persistent_context(**launch)
-        self.context.set_default_timeout(settings.NAV_TIMEOUT_MS)
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        try:
+            self.context = self._playwright.chromium.launch_persistent_context(**launch)
+            self.context.set_default_timeout(settings.NAV_TIMEOUT_MS)
+            self.page = (self.context.pages[0] if self.context.pages
+                         else self.context.new_page())
+        except BaseException as exc:
+            # Python does not call __exit__ when __enter__ raises, so without
+            # this the driver started two lines up would be left running and
+            # every later sync_playwright() in this process would die with
+            # "Sync API inside the asyncio loop". One failed launch took out
+            # the thirteen jobs behind it that way.
+            self._shutdown_driver()
+            raise BrowserUnavailable(self._explain_launch_failure(exc)) from exc
+
         log.info("Browser started (headless=%s, profile=%s)", self.headless, self.user_data_dir)
         return self
+
+    def _shutdown_driver(self) -> None:
+        """Stop the Playwright driver, whatever state it is in."""
+        try:
+            if self._playwright:
+                self._playwright.stop()
+        except Exception as exc:                 # nothing useful left to do
+            log.debug("Could not stop the Playwright driver: %s", exc)
+        finally:
+            self._playwright = None
+            self.context = None
+            self.page = None
+
+    def _explain_launch_failure(self, exc: BaseException) -> str:
+        """Turn Playwright's launch diagnostics into something actionable."""
+        text = str(exc)
+        if "already in use" in text or "Opening in existing browser session" in text:
+            return (
+                f"Another Chromium is already using the browser profile at "
+                f"{self.user_data_dir}. Quit that window (or `pkill -f "
+                f"'Chrome for Testing'`) and run the agent again."
+            )
+        return f"Could not start the browser: {text.splitlines()[0]}"
 
     def close(self) -> None:
         try:
@@ -313,12 +417,12 @@ class HumanBrowser:
 
     def detect_captcha(self) -> str | None:
         """Return a description of the CAPTCHA on screen, or None."""
-        for selector in CAPTCHA_SIGNATURES:
-            try:
-                if self.page.locator(selector).first.is_visible(timeout=350):
-                    return f"CAPTCHA element matched: {selector}"
-            except Exception:
-                continue
+        try:
+            found = self.page.evaluate(CAPTCHA_SCAN_JS)
+        except Exception:
+            found = None
+        if found:
+            return f"CAPTCHA element matched: {found}"
         try:
             body = (self.page.inner_text("body", timeout=1500) or "").lower()
         except Exception:

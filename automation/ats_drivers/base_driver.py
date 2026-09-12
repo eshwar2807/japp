@@ -23,9 +23,33 @@ from automation.stealth_browser import (
 from config import settings
 from database.db_manager import DBManager
 from engine.schemas import MasterProfile
-from engine.screener_mapper import FieldSpec, FieldType, MappedAnswer, ScreenerMapper
+from engine.screener_mapper import (
+    AnswerSource,
+    FieldSpec,
+    FieldType,
+    MappedAnswer,
+    ScreenerMapper,
+)
 
 log = logging.getLogger(__name__)
+
+#: What an ATS says once it has actually taken the application. Clicking the
+#: button proves nothing on its own, so one of these has to appear before a run
+#: is reported as submitted.
+CONFIRMATION_MARKERS = (
+    "thank you for applying",
+    "thanks for applying",
+    "thank you for your application",
+    "thank you for your interest",
+    "application received",
+    "application submitted",
+    "application complete",
+    "we have received your application",
+    "we've received your application",
+    "your application has been submitted",
+    "successfully submitted",
+    "submission received",
+)
 
 
 # JavaScript form scanner. Runs in one round trip and returns a descriptor for
@@ -124,7 +148,8 @@ FIELD_SCAN_JS = r"""
     if (tag === 'textarea') return 'textarea';
     const t = (el.getAttribute('type') || 'text').toLowerCase();
     if (['radio', 'checkbox', 'file', 'date'].includes(t)) return t;
-    if (['hidden', 'submit', 'button', 'image', 'reset'].includes(t)) return 'skip';
+    // A search box is never an application field, wherever it sits.
+    if (['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(t)) return 'skip';
     return 'text';
   };
 
@@ -134,16 +159,97 @@ FIELD_SCAN_JS = r"""
     /\*/.test(label || '') ||
     el.closest('[class*="required" i]') !== null;
 
+  // Site chrome. A careers page wraps the posting in a header search box, a
+  // footer "check out other roles" widget and a cookie bar, all of which hold
+  // real text inputs. Scanning them alongside the application is how a city
+  // ended up typed into a job-search field instead of the form.
+  const CHROME = 'header,footer,nav,[role="search"],[role="banner"],' +
+                 '[role="contentinfo"],[id*="cookie" i],[class*="cookie" i],' +
+                 '[id*="search" i],[class*="search" i]';
+  const inChrome = (el) => el.closest(CHROME) !== null;
+
+  // The application form, not the page. Pick the form holding the most
+  // fillable controls; fall back to the document when a page uses no <form>
+  // at all, which some single-page ATS front-ends do.
+  const scope = (() => {
+    let best = null, most = 0;
+    for (const f of document.querySelectorAll('form')) {
+      if (inChrome(f)) continue;
+      const n = Array.from(f.querySelectorAll('input, select, textarea'))
+        .filter(e => typeOf(e) !== 'skip' && !e.disabled && !e.readOnly).length;
+      if (n > most) { best = f; most = n; }
+    }
+    return most >= 2 ? best : document;
+  })();
+
+  // Hints that sit alongside a group's question without being it.
+  const GROUP_HINT = /^(select all that apply|choose all that apply|check all that apply|optional|required|\*)\.?$/i;
+
+  //: The question a group of controls is asking, as opposed to the text of any
+  //: one option. A <legend> when there is one; otherwise the fieldset's own
+  //: text with the option labels taken out, which is how Ashby writes it.
+  const groupQuestion = (fs, optionLabels) => {
+    const lg = fs.querySelector('legend');
+    if (lg && clean(lg.innerText)) return clean(lg.innerText);
+    const aria = ariaLabel(fs);
+    if (aria) return aria;
+    let text = fs.innerText || '';
+    for (const option of optionLabels) text = text.split(option).join('\n');
+    const lines = text.split('\n').map(s => s.trim())
+      .filter(s => s && !GROUP_HINT.test(s));
+    // Plaid writes the hint on the same line as the question:
+    // "Why are you interested in working at Plaid? Select all that apply."
+    const TRAILING_HINT = /\s*(select|choose|check)\s+all\s+that\s+apply\.?\s*$/i;
+    return clean((lines[0] || precedingLabel(fs) || '').replace(TRAILING_HINT, ''));
+  };
+
   const out = [];
   const seenGroups = new Set();
+  let groupSeq = 0;
 
-  document.querySelectorAll('input, select, textarea').forEach((el, idx) => {
+  scope.querySelectorAll('input, select, textarea').forEach((el, idx) => {
     const kind = typeOf(el);
     if (kind === 'skip') return;
+    if (scope === document && inChrome(el)) return;
     if (!visible(el) && kind !== 'file') return;   // file inputs are often hidden by design
     if (el.disabled || el.readOnly) return;
 
     const name = el.getAttribute('name') || el.id || '';
+
+    // A fieldset holding several checkboxes is one multi-select question, not
+    // one field per box. Ashby names each box after its own option, so the
+    // name-based grouping that works for radios leaves three fields labelled
+    // "San Francisco HQ", "New York City Office", "Seattle Office" - each with
+    // no options recorded. A location rule then matched the word "City" and
+    // typed the candidate's home city into a checkbox. Grouped, the question
+    // reads "Preferred Work Location" and carries its options, so an answer
+    // that is not one of them is escalated instead of forced in.
+    if (kind === 'checkbox') {
+      const fs = el.closest('fieldset');
+      const boxes = fs
+        ? Array.from(fs.querySelectorAll('input[type="checkbox"]'))
+            .filter(b => visible(b) && !b.disabled && !b.readOnly)
+        : [];
+      if (fs && boxes.length > 1) {
+        if (seenGroups.has(fs)) return;
+        seenGroups.add(fs);
+        if (!fs.dataset.jpGroup) fs.dataset.jpGroup = String(++groupSeq);
+
+        const optionLabels = boxes.map(b => labelFor(b) || clean(b.value)).filter(Boolean);
+        const question = groupQuestion(fs, optionLabels);
+        out.push({
+          label: question.slice(0, 300),
+          name: question,
+          field_type: 'radio',       // one question, answered from its options
+          required: isRequired(el, question),
+          selector: `fieldset[data-jp-group="${fs.dataset.jpGroup}"] input[type="checkbox"]`,
+          options: optionLabels,
+          values: boxes.map(b => b.value),
+        });
+        return;
+      }
+      // A lone checkbox - "I agree" - keeps the ordinary treatment below.
+    }
 
     if (kind === 'radio') {
       const key = name || labelFor(el);
@@ -151,7 +257,7 @@ FIELD_SCAN_JS = r"""
       seenGroups.add(key);
 
       const peers = name
-        ? Array.from(document.querySelectorAll(
+        ? Array.from(scope.querySelectorAll(
             `input[type="radio"][name="${CSS.escape(name)}"]`))
         : [el];
       const question = groupLabelFor(el) || labelFor(el);
@@ -199,6 +305,9 @@ class ApplicationOutcome(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     submitted: bool = False
+    #: What the page said afterwards. Empty means the click landed but
+    #: nothing confirmed it, which is not the same as success.
+    confirmation: str = ""
     fields_filled: int = 0
     resume_uploaded: bool = False
     account_created: bool = False
@@ -319,7 +428,51 @@ class BaseATSDriver:
                 filled += 1
                 log.info("  %-46s -> %s", field.question[:46], answer.value[:40])
 
+        if escalations:
+            filled += self.ask_for_unanswered(escalations, by_selector)
+            escalations = [e for e in escalations if not e.value]
         return filled, escalations
+
+    def ask_for_unanswered(
+        self, escalations: list[MappedAnswer], by_selector: dict[str, FieldSpec]
+    ) -> int:
+        """Put each unanswered field to the supervisor as an actual question.
+
+        Previously these were rolled into one approve-or-decline gate reading
+        "1 field(s) could not be answered safely", which told the user a
+        question existed without telling them what it was or letting them
+        answer it. The gatekeeper can carry a real question, its options and
+        the reason, so it does - and a value that comes back is filled in and
+        remembered for the next application.
+        """
+        filled = 0
+        for answer in escalations:
+            field = by_selector.get(answer.question) or next(
+                (f for f in by_selector.values() if f.question == answer.question), None
+            )
+            reply = self.browser.gatekeeper.ask(
+                answer.question,
+                reason=answer.reason,
+                kind="unmapped_field",
+                options=list(field.options) if field and field.options else None,
+                required=bool(field and field.required),
+            )
+            if not reply:
+                continue
+            answered = answer.model_copy(update={
+                "value": reply,
+                "source": AnswerSource.HUMAN,
+                "confidence": 1.0,
+                "reason": "you answered this",
+            })
+            if field and self.fill_field(field, answered):
+                filled += 1
+                # Nothing is stored here on purpose: ask() records the
+                # question as an action item, and answering one is what
+                # answered_action_map replays into the next application.
+                log.info("  %-46s -> %s (from you)",
+                         field.question[:46], reply[:40])
+        return filled
 
     # ---------------- resume upload ----------------
 
@@ -408,6 +561,7 @@ class BaseATSDriver:
                 [f"{e.question[:60]} - {e.reason}" for e in escalations],
             )
 
+        before_url = self.browser.page.url
         button = self.find_submit()
         if button is None:
             self.browser.hand_off(
@@ -434,7 +588,34 @@ class BaseATSDriver:
             self.browser.human_click(button)
 
         self.browser.page.wait_for_load_state("networkidle", timeout=30000)
+        self.confirmation = self.confirmation_evidence(before_url)
         return True
+
+    def confirmation_evidence(self, before_url: str) -> str:
+        """What the page says after submitting, or "" if it says nothing.
+
+        Clicking a button is not evidence that an employer received anything.
+        `submit` used to return True the moment the click landed and the page
+        settled, so "Submitted" meant only "we clicked". This looks for what an
+        ATS actually shows on success, and reports plainly when it finds none.
+        """
+        page = self.browser.page
+        for _ in range(3):
+            try:
+                text = (page.inner_text("body", timeout=5000) or "").lower()
+            except Exception:
+                text = ""
+            for marker in CONFIRMATION_MARKERS:
+                if marker in text:
+                    return marker
+            # Some portals confirm by navigating rather than by wording.
+            if page.url != before_url and any(
+                token in page.url.lower()
+                for token in ("confirm", "thank", "success", "submitted", "complete")
+            ):
+                return f"redirected to {page.url}"
+            page.wait_for_timeout(2000)
+        return ""
 
     # ---------------- template method ----------------
 
@@ -455,8 +636,20 @@ class BaseATSDriver:
         outcome.fields_filled = filled
         outcome.escalations = escalations
 
-        outcome.submitted = self.submit(escalations)
-        outcome.message = "Submitted" if outcome.submitted else "Not submitted"
+        self.confirmation = ""
+        clicked = self.submit(escalations)
+        outcome.confirmation = self.confirmation
+        # Submitted means the employer said so. A click with nothing to show
+        # for it is reported as exactly that, so a run is never recorded as a
+        # sent application on the strength of a button press.
+        outcome.submitted = bool(clicked and outcome.confirmation)
+        if outcome.submitted:
+            outcome.message = f"Submitted - confirmed by: {outcome.confirmation[:80]}"
+        elif clicked:
+            outcome.message = ("Clicked submit but the page showed no confirmation; "
+                               "check this one yourself")
+        else:
+            outcome.message = "Not submitted"
         return outcome
 
     def open_application_form(self) -> None:

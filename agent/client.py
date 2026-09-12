@@ -99,6 +99,14 @@ class DashboardClient:
             "escalations": escalations or [],
         })
 
+    def release(self, job_id: int, reason: str = "") -> None:
+        """Give a claimed job back so another run can take it.
+
+        Used when the failure is the machine's, not the application's.
+        """
+        self._request("POST", f"/api/v1/agent/jobs/{job_id}/release",
+                      {"reason": reason})
+
     def log(self, job_id: int, event: str, message: str = "", level: str = "INFO") -> None:
         try:
             self._request("POST", f"/api/v1/agent/jobs/{job_id}/log", {

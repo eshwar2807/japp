@@ -91,3 +91,42 @@ def request_params(model: str, effort: str | None = None) -> dict[str, Any]:
     if resolved:
         params["output_config"] = {"effort": resolved}
     return params
+
+
+# --------------------------------------------------------------------------
+# Client construction
+# --------------------------------------------------------------------------
+
+#: How many times to ride out a transient failure before giving up.
+#:
+#: The SDK defaults to two quick retries, which was not enough for a real
+#: overload: six tailoring jobs died in one burst on
+#:
+#:     503 overloaded_error: API key validation is temporarily unavailable.
+#:                           Please retry.
+#:
+#: an error whose own text asks for a retry. Each of those was a posting the
+#: user never saw, lost to a few seconds of upstream weather.
+CLIENT_MAX_RETRIES = 6
+
+#: Generous, because a tailoring call with thinking enabled is not quick, and a
+#: timeout here costs the whole job.
+CLIENT_TIMEOUT_SECONDS = 600.0
+
+
+def make_client(api_key: str = "", **overrides: Any):
+    """An Anthropic client configured to survive a transient overload.
+
+    Every call site builds its client through this, so the retry policy is one
+    decision rather than four that drift apart.
+    """
+    import anthropic
+
+    options: dict[str, Any] = {
+        "max_retries": CLIENT_MAX_RETRIES,
+        "timeout": CLIENT_TIMEOUT_SECONDS,
+    }
+    if api_key:
+        options["api_key"] = api_key
+    options.update(overrides)
+    return anthropic.Anthropic(**options)

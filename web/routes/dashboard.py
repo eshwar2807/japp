@@ -56,6 +56,9 @@ def render(request: Request, template: str, user, db, **context) -> HTMLResponse
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "open_actions": db.count_open_actions(user.id) if user else 0,
         "queue": db.queue_summary(user.id) if user else {},
+        # Shown beside the search switch. The decision to leave the search
+        # running is a spending decision, so the number belongs next to it.
+        "spend_today": db.spend_today(user.id) if user else 0.0,
         "path": request.url.path,
     }
     return templates.TemplateResponse(request, template, {**base, **context})
@@ -253,8 +256,12 @@ def applications_page(request: Request, user: CurrentUser, db: Database,
         except ValueError:
             status_filter = None
 
+    # Only postings that cleared every check, the match bar included. A role
+    # that failed one is not an application you can send, and listing it here
+    # alongside the real ones made the tab impossible to trust; those live on
+    # /applications/not-eligible with the reason attached.
     applications = db.list_applications(
-        status=status_filter, limit=200, user_id=user.id, ready_only=bool(ready)
+        status=status_filter, limit=200, user_id=user.id, eligibility="passing"
     )
     # Which of these already have a browser run waiting, so the list can say
     # what is queued rather than leaving it to be inferred from the score.
@@ -271,7 +278,50 @@ def applications_page(request: Request, user: CurrentUser, db: Database,
         ready_only=bool(ready),
         queued_ids=queued_ids,
         ready_count=db.eligible_today(user.id),
+        not_eligible_count=len(db.list_applications(
+            limit=500, user_id=user.id, eligibility="failing")),
         ok=ok, error=error,
+    )
+
+
+@router.post("/search/toggle")
+async def toggle_search(request: Request, user: CurrentUser, db: Database,
+                        _csrf: None = CSRFProtected):
+    """Turn the automatic job search on or off.
+
+    The search reads boards for free but screens what passes with an LLM, so it
+    costs money every day whether or not anyone is applying that day. It is the
+    user's decision when to spend that, and the control belongs where they can
+    see it rather than buried in a schedule form.
+    """
+    form = await request.form()
+    on = str(form.get("on", "")).lower() in ("1", "true", "on", "yes")
+    db.update_user(user.id, topup_enabled=on)
+    db.log_event(
+        user.id, "search_toggled",
+        f"Automatic job search turned {'on' if on else 'off'} "
+        f"(spent ${db.spend_today(user.id):.2f} today).",
+    )
+    back = str(form.get("back", "")) or "/"
+    if not back.startswith("/"):        # never bounce off-site on a form value
+        back = "/"
+    return RedirectResponse(back, status_code=303)
+
+
+@router.get("/applications/not-eligible")
+def not_eligible_page(request: Request, user: CurrentUser, db: Database):
+    """Postings that were tailored but cannot be sent, and why.
+
+    Kept rather than deleted: the reason is the useful part. Seeing that a role
+    was dropped for "employer states they will not sponsor" is what stops the
+    same posting being queued by hand next week.
+    """
+    applications = db.list_applications(
+        limit=200, user_id=user.id, eligibility="failing")
+    return render(
+        request, "not_eligible.html", user, db,
+        applications=applications,
+        ready_count=db.eligible_today(user.id),
     )
 
 

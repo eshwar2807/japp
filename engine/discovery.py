@@ -149,10 +149,10 @@ class DiscoveryEngine:
     @property
     def client(self) -> Any:
         if self._client is None:
-            import anthropic
+            from engine.llm import make_client
 
             key = self.api_key or settings.ANTHROPIC_API_KEY
-            self._client = anthropic.Anthropic(**({"api_key": key} if key else {})).messages
+            self._client = make_client(key).messages
         return self._client
 
     # ---------------- stage 1: companies ----------------
@@ -179,6 +179,28 @@ class DiscoveryEngine:
             raise RuntimeError("Discovery returned no structured output.")
         return result
 
+    @staticmethod
+    def _cacheable(content: Any) -> list[dict[str, Any]]:
+        """Serialise an assistant turn and mark its end as a cache breakpoint.
+
+        The pause-turn loop resends everything the search has produced so far,
+        so by the fourth turn the same tens of thousands of tokens have been
+        paid for four times over - which is how 22 discovery calls averaged
+        91,537 input tokens each and cost five times what 250 tailoring calls
+        did. A breakpoint at the end of each appended turn lets the next one
+        read that prefix at roughly a tenth of the price.
+
+        At most three breakpoints accumulate here, inside the limit of four.
+        """
+        blocks: list[dict[str, Any]] = [
+            block.model_dump(mode="json", exclude_none=True)
+            if hasattr(block, "model_dump") else dict(block)
+            for block in content
+        ]
+        if blocks:
+            blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        return blocks
+
     def _call(self, prompt: str) -> Any:
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
@@ -192,7 +214,7 @@ class DiscoveryEngine:
                 messages=messages,
                 tools=[WEB_SEARCH_TOOL],
                 output_format=CompanySearchResult,
-                **request_params(self.model, settings.LLM_EFFORT),
+                **request_params(self.model, settings.LLM_EFFORT_DISCOVERY),
             )
             if self.on_usage is not None:
                 try:
@@ -208,7 +230,8 @@ class DiscoveryEngine:
                 )
             if stop != "pause_turn":
                 return response
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant",
+                             "content": self._cacheable(response.content)})
 
         return response
 
@@ -263,6 +286,9 @@ class DiscoveryEngine:
         """Fetch each company's board. Returns (postings, problems)."""
         collected: list[Posting] = []
         problems: list[str] = []
+        #: Boards that actually answered. Worth keeping: a company found by web
+        #: search is only useful once, but its board is useful every day.
+        self.resolved_boards: list[tuple[str, str, str]] = []
 
         for company in companies:
             # The model guesses both slug and provider, and gets the provider
@@ -274,6 +300,7 @@ class DiscoveryEngine:
                 problems.append(f"{company.name}: no board found on any provider")
                 continue
             board, slug, postings = resolved
+            self.resolved_boards.append((company.name, board, slug))
 
             kept = [
                 p for p in postings
@@ -326,4 +353,5 @@ class DiscoveryEngine:
             "problems": problems,
             "notes": search.notes,
             "scored": scored,
+            "resolved_boards": getattr(self, "resolved_boards", []),
         }

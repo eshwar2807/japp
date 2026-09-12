@@ -390,6 +390,26 @@ def agent_finish(user: APIUser, db: Database, job_id: int, payload: dict = Body(
     return {"ok": True, "status": "Done" if submitted else "Failed"}
 
 
+@router.post("/agent/jobs/{job_id}/release")
+def agent_release(user: APIUser, db: Database, job_id: int, payload: dict = Body(...)):
+    """Hand a claimed job back unrun.
+
+    For conditions that have nothing to do with the application - the agent's
+    machine cannot start a browser, say. Marking those Failed would burn the
+    whole queue on one local problem, which is what happened when a stale
+    Chrome held the profile: thirteen applications were recorded as failures.
+    """
+    job = db.get_job(job_id, user_id=user.id)
+    if job is None:
+        raise HTTPException(404, "Job not found.")
+
+    reason = str(payload.get("reason", ""))[:500] or "Released by the agent"
+    attempt = db.retry_job(job_id, reason)
+    db.log_event(user.id, "job_released", f"Job #{job_id} returned to the queue: {reason}",
+                 level=LogLevel.WARNING, application_id=job.application_id)
+    return {"ok": True, "status": "Queued", "attempts": attempt}
+
+
 @router.post("/agent/jobs/{job_id}/log")
 def agent_log(user: APIUser, db: Database, job_id: int, payload: dict = Body(...)):
     """Stream a log line from the agent into the dashboard's run log."""

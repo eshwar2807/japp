@@ -97,12 +97,36 @@ TOPUP_COMPANIES = [
     "Spring Health", "Cloudflare", "Datadog", "Gusto", "Betterment", "Oscar Health",
     "Included Health", "Zocdoc", "Vanta", "Chime", "Wise", "Tenable",
     "Western Digital", "Sodexo", "Nuvei", "Alloy", "Unit21",
+    # Java-heavy employers. A screening run over the list above read 5,172
+    # postings and found 89 unseen US title-matches, of which 83 were rejected
+    # as "not a Java role" - not a detector fault, those postings contain no
+    # Java, Spring, JVM, Kotlin or Scala at all. Most of the original list are
+    # Go/Python/TypeScript shops. These carry JVM work; MongoDB alone had four
+    # eligible roles on the day they were added. Reading a board is free, so a
+    # quiet one costs nothing but is there when it does hire.
+    "MongoDB", "Elastic", "Neo4j", "Couchbase", "Squarespace",
+    "NerdWallet", "Wayfair",
+    # Second pass, added on evidence rather than reputation: each of these was
+    # screened against the live filters first and returned at least one
+    # eligible role on the day. Braze alone returned six.
+    "Braze", "Coinbase", "Imply", "Block", "Starburst", "Lyft", "Instacart",
+    # Palantir was here on the strength of a screening run; removed at the
+    # user's request. The blocklist would skip it anyway, but a board nobody
+    # wants read should not be in the list to begin with.
 ]
 # Postings discovery may queue for screening per day. Deliberately much higher
 # than the application cap: screening a posting that turns out unviable costs
 # one cheap extraction call, and finding twenty matches means looking at far
 # more than twenty postings.
 DAILY_SCREEN_CAP = int(os.getenv("JP_DAILY_SCREEN_CAP", "250"))
+
+# The day's target is a target, not one attempt at it. A single top-up that
+# falls short used to leave the shortfall until 3am the next morning, so the
+# only way it ever got closed was the user noticing and asking. These let the
+# worker keep going on its own: wait this long after a run before trying
+# again, and stop after this many runs so a genuinely dry day cannot spin.
+TOPUP_RETRY_MINUTES = int(os.getenv("JP_TOPUP_RETRY_MINUTES", "20"))
+TOPUP_MAX_RUNS_PER_DAY = int(os.getenv("JP_TOPUP_MAX_RUNS_PER_DAY", "12"))
 # Default auto-apply threshold for new accounts. 0 disables it.
 AUTO_APPLY_THRESHOLD = float(os.getenv("JP_AUTO_APPLY_THRESHOLD", "0"))
 # Minimum free text-only fit estimate for a discovered posting to be queued.
@@ -110,6 +134,18 @@ AUTO_APPLY_THRESHOLD = float(os.getenv("JP_AUTO_APPLY_THRESHOLD", "0"))
 # match target - it only drops the plainly hopeless.
 DISCOVERY_MIN_FIT = float(os.getenv("JP_DISCOVERY_MIN_FIT", "12"))
 LLM_EFFORT = os.getenv("JP_LLM_EFFORT", "high")        # low|medium|high|xhigh|max
+# Discovery asks which companies are hiring and reads search results back. That
+# is retrieval, not reasoning, and its output tokens are the one part of the
+# bill caching cannot reduce - 168K output tokens over 22 calls was $4.21 of a
+# $14.28 line. Separate from LLM_EFFORT so tailoring quality is unaffected.
+LLM_EFFORT_DISCOVERY = os.getenv("JP_LLM_EFFORT_DISCOVERY", "medium")
+
+# How many roles to apply for at any one employer; 0 means no limit, which is
+# the default. Consistency is handled by reusing the resume already sent to
+# that company rather than by refusing the second role - capping it at one
+# turned out to reject everything, because almost every board worth screening
+# had already been applied to once.
+MAX_APPLICATIONS_PER_COMPANY = int(os.getenv("JP_MAX_APPLICATIONS_PER_COMPANY", "0"))
 LLM_MAX_TOKENS = int(os.getenv("JP_LLM_MAX_TOKENS", "16000"))
 LLM_TEMPERATURE: float | None = (
     float(os.environ["JP_LLM_TEMPERATURE"]) if "JP_LLM_TEMPERATURE" in os.environ else None
